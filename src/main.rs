@@ -9,6 +9,7 @@ use crossterm::{
 };
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use notify::{Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -20,7 +21,14 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
 use std::collections::HashSet;
 use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::process::Command as StdCommand;
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+use walkdir::WalkDir;
 
 /// Pending file operation stored in the clipboard.
 #[derive(Debug, Clone)]
@@ -38,6 +46,11 @@ enum Mode {
     BatchRename,         // batch rename pattern input
     Confirm(ConfirmAction),
     Command(String),     // command input
+    ShellInput(String),  // shell command input
+    ShellOutput(String), // display shell output
+    FileViewer,          // view file content with syntax highlighting or hex
+    FuzzyFinder(String), // recursive fuzzy finder
+    Bookmarks,           // bookmark list and jump
 }
 
 /// Actions that require a y/n confirmation.
@@ -80,6 +93,19 @@ struct App {
     image_state: Option<StatefulProtocol>,
     last_image_path: Option<PathBuf>,
     batch_rename_input: String,
+    file_viewer_content: Vec<(String, Style)>,
+    file_viewer_scroll: usize,
+    file_viewer_title: String,
+    fuzzy_finder_paths: Vec<PathBuf>,
+    fuzzy_finder_matches: Vec<usize>,
+    fuzzy_finder_selected: usize,
+    shell_input: String,
+    shell_scroll: usize,
+    bookmark_selected: usize,
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
+    config_rx: Option<mpsc::Receiver<()>>,
+    config_last_modified: Option<SystemTime>,
 }
 
 impl App {
@@ -87,6 +113,9 @@ impl App {
         let themes = config::load_themes();
         let picker = Picker::from_query_stdio()
             .unwrap_or_else(|_| Picker::halfblocks());
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
+        let config_rx = setup_config_watcher();
         let mut app = Self {
             current_dir: initial_dir.clone(),
             files: Self::list_files(&initial_dir, true, SortBy::Name, None),
@@ -110,6 +139,19 @@ impl App {
             image_state: None,
             last_image_path: None,
             batch_rename_input: String::new(),
+            file_viewer_content: Vec::new(),
+            file_viewer_scroll: 0,
+            file_viewer_title: String::new(),
+            fuzzy_finder_paths: Vec::new(),
+            fuzzy_finder_matches: Vec::new(),
+            fuzzy_finder_selected: 0,
+            shell_input: String::new(),
+            shell_scroll: 0,
+            bookmark_selected: 0,
+            syntax_set,
+            theme_set,
+            config_rx,
+            config_last_modified: None,
         };
         app.clamp_selection();
         app
@@ -235,6 +277,174 @@ impl App {
         }
     }
 
+    fn check_config_reload(&mut self) {
+        if let Some(ref rx) = self.config_rx {
+            if rx.try_recv().is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+                let new_config = config::load_config();
+                self.config.colors = new_config.colors.clone();
+                self.config.keys = new_config.keys.clone();
+                self.config.active_theme = new_config.active_theme.clone();
+                self.config.bookmarks = new_config.bookmarks.clone();
+                self.set_status("Config reloaded".to_string());
+            }
+        }
+    }
+
+    fn open_file_viewer(&mut self) {
+        if let Some(path) = self.selected_path() {
+            if !path.is_file() {
+                self.set_status("Not a file".to_string());
+                return;
+            }
+            self.file_viewer_title = path.display().to_string();
+            self.file_viewer_scroll = 0;
+            self.file_viewer_content.clear();
+
+            if files::is_text_file(&path) {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        let syntax = self.syntax_set.find_syntax_by_extension(ext)
+                            .or_else(|| self.syntax_set.find_syntax_by_first_line(&content))
+                            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+                        let theme = &self.theme_set.themes["base16-ocean.dark"];
+                        let mut highlighter = HighlightLines::new(syntax, theme);
+                        for line in LinesWithEndings::from(&content) {
+                            let highlighted = highlighter.highlight_line(line, &self.syntax_set).unwrap_or_default();
+                            let mut line_text = String::new();
+                            let mut line_style = Style::default();
+                            if highlighted.is_empty() {
+                                line_text = line.trim_end_matches('\n').to_string();
+                            } else {
+                                for (style, text) in highlighted {
+                                    line_text.push_str(text);
+                                    line_style = Style::default()
+                                        .fg(Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b));
+                                }
+                            }
+                            self.file_viewer_content.push((line_text.trim_end_matches('\n').to_string(), line_style));
+                        }
+                        self.mode = Mode::FileViewer;
+                    }
+                    Err(e) => self.set_status(files::format_err(e)),
+                }
+            } else {
+                match files::hex_dump(&path, 2048) {
+                    Ok(hex) => {
+                        for line in hex.lines() {
+                            self.file_viewer_content.push((line.to_string(), Style::default().fg(Color::Yellow)));
+                        }
+                        self.mode = Mode::FileViewer;
+                    }
+                    Err(e) => self.set_status(files::format_err(e)),
+                }
+            }
+        }
+    }
+
+    fn open_fuzzy_finder(&mut self) {
+        self.fuzzy_finder_paths.clear();
+        self.fuzzy_finder_matches.clear();
+        self.fuzzy_finder_selected = 0;
+        for entry in WalkDir::new(&self.current_dir).into_iter().flatten() {
+            let path = entry.path().to_path_buf();
+            if path != self.current_dir {
+                self.fuzzy_finder_paths.push(path);
+            }
+        }
+        self.mode = Mode::FuzzyFinder(String::new());
+        self.update_fuzzy_finder();
+    }
+
+    fn update_fuzzy_finder(&mut self) {
+        let matcher = SkimMatcherV2::default();
+        let query = match &self.mode {
+            Mode::FuzzyFinder(q) => q.to_lowercase(),
+            _ => return,
+        };
+        self.fuzzy_finder_matches = self.fuzzy_finder_paths
+            .iter()
+            .enumerate()
+            .filter_map(|(i, path)| {
+                let name = path.strip_prefix(&self.current_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+                matcher.fuzzy_match(&name.to_lowercase(), &query).map(|_| i)
+            })
+            .collect();
+        self.fuzzy_finder_selected = 0;
+    }
+
+    fn run_shell_command(&mut self, cmd: &str) {
+        if cmd.trim().is_empty() {
+            return;
+        }
+        let output = StdCommand::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&self.current_dir)
+            .output();
+        match output {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                let mut combined = format!("$ {}\n", cmd);
+                if !stdout.is_empty() {
+                    combined.push_str(&stdout);
+                }
+                if !stderr.is_empty() {
+                    combined.push_str("\n[stderr]\n");
+                    combined.push_str(&stderr);
+                }
+                if stdout.is_empty() && stderr.is_empty() {
+                    combined.push_str("(no output)");
+                }
+                self.shell_scroll = 0;
+                self.mode = Mode::ShellOutput(combined);
+                self.refresh();
+            }
+            Err(e) => self.set_status(format!("Shell error: {}", e)),
+        }
+    }
+
+    fn jump_to_bookmark(&mut self, index: usize) {
+        if let Some(path_str) = self.config.bookmarks.get(index) {
+            let path = PathBuf::from(path_str);
+            if path.is_dir() {
+                self.current_dir = path;
+                self.refresh();
+                self.selected = 0;
+                self.mode = Mode::Normal;
+            } else {
+                self.set_status(format!("Bookmark not found: {}", path_str));
+            }
+        }
+    }
+
+    fn add_bookmark(&mut self) {
+        let path_str = self.current_dir.to_string_lossy().to_string();
+        if self.config.bookmarks.contains(&path_str) {
+            self.set_status("Directory already bookmarked".to_string());
+            return;
+        }
+        self.config.bookmarks.push(path_str.clone());
+        config::save_config(&self.config);
+        self.set_status(format!("Bookmarked: {}", path_str));
+    }
+
+    fn remove_bookmark(&mut self, index: usize) {
+        if index < self.config.bookmarks.len() {
+            let removed = self.config.bookmarks.remove(index);
+            config::save_config(&self.config);
+            self.set_status(format!("Removed bookmark: {}", removed));
+            if self.bookmark_selected >= self.config.bookmarks.len() && self.bookmark_selected > 0 {
+                self.bookmark_selected -= 1;
+            }
+        }
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let key = KeyCodeChar::from(code);
 
@@ -330,6 +540,129 @@ impl App {
                 }
                 KeyCode::Char(c) => {
                     input.push(c);
+                }
+                _ => {}
+            },
+            Mode::ShellInput(input) => match code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Enter => {
+                    let cmd = input.clone();
+                    self.mode = Mode::Normal;
+                    self.run_shell_command(&cmd);
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                }
+                _ => {}
+            },
+            Mode::ShellOutput(_) => match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.shell_scroll += 1;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if self.shell_scroll > 0 {
+                        self.shell_scroll -= 1;
+                    }
+                }
+                _ => {}
+            },
+            Mode::FileViewer => match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.file_viewer_scroll += 1;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if self.file_viewer_scroll > 0 {
+                        self.file_viewer_scroll -= 1;
+                    }
+                }
+                KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.file_viewer_scroll += self.list_height as usize;
+                }
+                KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.file_viewer_scroll = self.file_viewer_scroll.saturating_sub(self.list_height as usize);
+                }
+                KeyCode::Char('g') if modifiers == KeyModifiers::NONE => {
+                    self.file_viewer_scroll = 0;
+                }
+                KeyCode::Char('G') => {
+                    self.file_viewer_scroll = self.file_viewer_content.len().saturating_sub(1);
+                }
+                _ => {}
+            },
+            Mode::FuzzyFinder(query) => match code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Enter => {
+                    let selected_path = self.fuzzy_finder_matches.get(self.fuzzy_finder_selected)
+                        .and_then(|&idx| self.fuzzy_finder_paths.get(idx))
+                        .cloned();
+                    if let Some(path) = selected_path {
+                        if path.is_dir() {
+                            self.current_dir = path;
+                            self.refresh();
+                            self.selected = 0;
+                        } else if let Some(parent) = path.parent() {
+                            let file_name = path.file_name().map(|n| n.to_string_lossy().to_string());
+                            self.current_dir = parent.to_path_buf();
+                            self.refresh();
+                            if let Some(name) = file_name {
+                                self.selected = self.files.iter().position(|(n, _)| n == &name).unwrap_or(0);
+                            }
+                        }
+                    }
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    self.update_fuzzy_finder();
+                }
+                KeyCode::Down => {
+                    if self.fuzzy_finder_selected + 1 < self.fuzzy_finder_matches.len() {
+                        self.fuzzy_finder_selected += 1;
+                    }
+                }
+                KeyCode::Up => {
+                    if self.fuzzy_finder_selected > 0 {
+                        self.fuzzy_finder_selected -= 1;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    self.update_fuzzy_finder();
+                }
+                _ => {}
+            },
+            Mode::Bookmarks => match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Enter => {
+                    self.jump_to_bookmark(self.bookmark_selected);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.bookmark_selected + 1 < self.config.bookmarks.len() {
+                        self.bookmark_selected += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.bookmark_selected > 0 {
+                        self.bookmark_selected -= 1;
+                    }
+                }
+                KeyCode::Char('d') => {
+                    self.remove_bookmark(self.bookmark_selected);
                 }
                 _ => {}
             },
@@ -442,6 +775,33 @@ impl App {
             self.search_query.clear();
             self.search_matches.clear();
             self.search_selected = 0;
+            return;
+        }
+
+        if code == KeyCode::Char('v') {
+            self.open_file_viewer();
+            return;
+        }
+
+        if code == KeyCode::Char('?') {
+            self.open_fuzzy_finder();
+            return;
+        }
+
+        if code == KeyCode::Char('!') {
+            self.shell_input.clear();
+            self.mode = Mode::ShellInput(String::new());
+            return;
+        }
+
+        if code == KeyCode::Char('b') && modifiers == KeyModifiers::NONE {
+            self.add_bookmark();
+            return;
+        }
+
+        if code == KeyCode::Char('B') {
+            self.bookmark_selected = 0;
+            self.mode = Mode::Bookmarks;
             return;
         }
 
@@ -618,6 +978,21 @@ impl App {
         }
     }
 
+    fn get_selected_paths(&self) -> Vec<PathBuf> {
+        let indices: Vec<usize> = if self.selected_indices.is_empty() {
+            if self.selected < self.files.len() {
+                vec![self.selected]
+            } else {
+                vec![]
+            }
+        } else {
+            self.selected_indices.iter().copied().collect()
+        };
+        indices.iter()
+            .filter_map(|&idx| self.files.get(idx).map(|(name, _)| self.current_dir.join(name)))
+            .collect()
+    }
+
     fn execute_command(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
         if parts.is_empty() {
@@ -746,6 +1121,80 @@ impl App {
                     self.selected_indices.insert(self.selected);
                 }
                 self.perform_batch_rename(pattern);
+            }
+            "zip" => {
+                if parts.len() < 2 {
+                    self.set_status("Usage: :zip <name>".to_string());
+                    return;
+                }
+                let name = format!("{}.zip", parts[1].trim_end_matches(".zip"));
+                let paths = self.get_selected_paths();
+                if paths.is_empty() {
+                    self.set_status("No items selected".to_string());
+                    return;
+                }
+                let output = self.current_dir.join(&name);
+                match files::create_zip_archive(&paths, &output) {
+                    Ok(()) => {
+                        self.set_status(format!("Created archive: {}", name));
+                        self.refresh();
+                    }
+                    Err(e) => self.set_status(files::format_err(e)),
+                }
+            }
+            "tar" => {
+                if parts.len() < 2 {
+                    self.set_status("Usage: :tar <name>".to_string());
+                    return;
+                }
+                let name = format!("{}.tar.gz", parts[1].trim_end_matches(".tar.gz"));
+                let paths = self.get_selected_paths();
+                if paths.is_empty() {
+                    self.set_status("No items selected".to_string());
+                    return;
+                }
+                let output = self.current_dir.join(&name);
+                match files::create_tar_archive(&paths, &output) {
+                    Ok(()) => {
+                        self.set_status(format!("Created archive: {}", name));
+                        self.refresh();
+                    }
+                    Err(e) => self.set_status(files::format_err(e)),
+                }
+            }
+            "extract" | "x" => {
+                if let Some(path) = self.selected_path() {
+                    if !files::is_archive_file(&path) {
+                        self.set_status("Selected file is not an archive".to_string());
+                        return;
+                    }
+                    let output_dir = self.current_dir.join(
+                        path.file_stem().unwrap_or(path.as_os_str())
+                    );
+                    match files::extract_archive(&path, &output_dir) {
+                        Ok(()) => {
+                            self.set_status(format!("Extracted to: {}", output_dir.display()));
+                            self.refresh();
+                        }
+                        Err(e) => self.set_status(files::format_err(e)),
+                    }
+                } else {
+                    self.set_status("No archive selected".to_string());
+                }
+            }
+            "find" => {
+                self.open_fuzzy_finder();
+            }
+            "shell" | "sh" => {
+                let cmd = parts[1..].join(" ");
+                self.run_shell_command(&cmd);
+            }
+            "bookmark" | "bm" => {
+                self.bookmark_selected = 0;
+                self.mode = Mode::Bookmarks;
+            }
+            "bookmark-add" | "ba" => {
+                self.add_bookmark();
             }
             _ => {
                 self.set_status(format!("Unknown command: {}", parts[0]));
@@ -904,6 +1353,8 @@ impl App {
         let list_title = match &self.mode {
             Mode::Search => format!("VHS-86 — search: {}", self.search_query),
             Mode::Command(cmd) => format!("VHS-86 — :{}", cmd),
+            Mode::ShellInput(cmd) => format!("VHS-86 — shell: {}", cmd),
+            Mode::FuzzyFinder(query) => format!("VHS-86 — find: {}", query),
             _ => {
                 let selected_count = self.selected_indices.len();
                 let filter_info = self.filter_ext.as_ref()
@@ -1003,6 +1454,11 @@ impl App {
         match &self.mode {
             Mode::Rename(_) => self.draw_input_box(f, "Rename", &self.rename_input),
             Mode::BatchRename => self.draw_input_box(f, "Batch Rename (pattern: vacation_{:03}.jpg)", &self.batch_rename_input),
+            Mode::ShellInput(input) => self.draw_input_box(f, "Shell Command", input),
+            Mode::ShellOutput(output) => self.draw_shell_output(f, output),
+            Mode::FileViewer => self.draw_file_viewer(f),
+            Mode::FuzzyFinder(_) => self.draw_fuzzy_finder(f),
+            Mode::Bookmarks => self.draw_bookmarks(f),
             Mode::Confirm(ConfirmAction::Delete(path)) => {
                 self.draw_confirm_box(f, &format!("Delete {}? [y/N]", path.display()))
             }
@@ -1048,7 +1504,7 @@ impl App {
     }
 
     fn draw_command_box(&self, f: &mut ratatui::Frame, cmd: &str) {
-        let area = centered_rect(70, 20, f.area());
+        let area = centered_rect(70, 25, f.area());
         f.render_widget(Clear, area);
 
         let help_text = format!(
@@ -1063,7 +1519,14 @@ impl App {
              \u{0020} :open / :o          — open selected file\n\
              \u{0020} :sort <name|size|modified> — sort files\n\
              \u{0020} :filter <ext>       — filter by extension\n\
-             \u{0020} :batchrename <pat>  — batch rename selected",
+             \u{0020} :batchrename <pat>  — batch rename selected\n\
+             \u{0020} :zip <name>         — create zip archive\n\
+             \u{0020} :tar <name>         — create tar.gz archive\n\
+             \u{0020} :extract / :x       — extract selected archive\n\
+             \u{0020} :find / :f          — recursive fuzzy finder\n\
+             \u{0020} :shell <cmd>        — run shell command\n\
+             \u{0020} :bookmark / :bm     — list bookmarks\n\
+             \u{0020} :bookmark-add / :ba — add current dir to bookmarks",
             cmd
         );
 
@@ -1076,6 +1539,123 @@ impl App {
                     .border_style(Style::default().fg(Color::Cyan)),
             );
         f.render_widget(command_widget, area);
+    }
+
+    fn draw_shell_output(&self, f: &mut ratatui::Frame, output: &str) {
+        let area = centered_rect(85, 70, f.area());
+        f.render_widget(Clear, area);
+
+        let lines: Vec<&str> = output.lines().collect();
+        let visible: Vec<String> = lines.iter()
+            .skip(self.shell_scroll)
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|l| l.to_string())
+            .collect();
+
+        let content = visible.join("\n");
+        let paragraph = Paragraph::new(content)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Shell Output ({} lines, scroll: {})", lines.len(), self.shell_scroll))
+                    .border_style(Style::default().fg(Color::Green)),
+            );
+        f.render_widget(paragraph, area);
+    }
+
+    fn draw_file_viewer(&self, f: &mut ratatui::Frame) {
+        let area = centered_rect(90, 85, f.area());
+        f.render_widget(Clear, area);
+
+        let visible: Vec<ratatui::text::Line> = self.file_viewer_content.iter()
+            .skip(self.file_viewer_scroll)
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|(text, style)| {
+                ratatui::text::Line::styled(text.clone(), *style)
+            })
+            .collect();
+
+        let paragraph = Paragraph::new(ratatui::text::Text::from(visible))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("{} ({} lines, scroll: {})", self.file_viewer_title, self.file_viewer_content.len(), self.file_viewer_scroll))
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
+        f.render_widget(paragraph, area);
+    }
+
+    fn draw_fuzzy_finder(&self, f: &mut ratatui::Frame) {
+        let area = centered_rect(80, 70, f.area());
+        f.render_widget(Clear, area);
+
+        let query = match &self.mode {
+            Mode::FuzzyFinder(q) => q.clone(),
+            _ => String::new(),
+        };
+
+        let items: Vec<ListItem> = self.fuzzy_finder_matches.iter()
+            .enumerate()
+            .map(|(i, &idx)| {
+                let path = &self.fuzzy_finder_paths[idx];
+                let display = path.strip_prefix(&self.current_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+                let style = if i == self.fuzzy_finder_selected {
+                    Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(display).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Fuzzy Finder: {} ({} matches)", query, self.fuzzy_finder_matches.len()))
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(list, area);
+    }
+
+    fn draw_bookmarks(&self, f: &mut ratatui::Frame) {
+        let area = centered_rect(60, 50, f.area());
+        f.render_widget(Clear, area);
+
+        if self.config.bookmarks.is_empty() {
+            let msg = Paragraph::new("No bookmarks saved.\nPress 'b' in normal mode to bookmark current directory.")
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Bookmarks")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                );
+            f.render_widget(msg, area);
+            return;
+        }
+
+        let items: Vec<ListItem> = self.config.bookmarks.iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let style = if i == self.bookmark_selected {
+                    Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("{} {}", i + 1, path)).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Bookmarks ({} saved)", self.config.bookmarks.len()))
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+        f.render_widget(list, area);
     }
 }
 
@@ -1100,6 +1680,30 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn setup_config_watcher() -> Option<mpsc::Receiver<()>> {
+    let (tx, rx) = mpsc::channel();
+    if let Some(path) = config::config_path() {
+        if let Some(parent) = path.parent() {
+            let parent = parent.to_path_buf();
+            let tx = tx.clone();
+            if let Ok(mut watcher) = RecommendedWatcher::new(
+                move |res: Result<NotifyEvent, notify::Error>| {
+                    if let Ok(event) = res {
+                        if event.kind.is_modify() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                NotifyConfig::default(),
+            ) {
+                let _ = watcher.watch(&parent, RecursiveMode::NonRecursive);
+                std::mem::forget(watcher);
+            }
+        }
+    }
+    Some(rx)
+}
+
 fn main() -> io::Result<()> {
     let mut terminal = setup_terminal()?;
 
@@ -1115,6 +1719,7 @@ fn main() -> io::Result<()> {
 
     loop {
         app.clear_status_if_expired();
+        app.check_config_reload();
         app.update_image_preview();
 
         terminal.draw(|f| app.draw(f))?;
