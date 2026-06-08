@@ -182,7 +182,7 @@ pub fn archive_type_name(archive_type: &ArchiveType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     #[test]
     fn test_detect_archive_zip() {
