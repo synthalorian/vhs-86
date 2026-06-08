@@ -58,6 +58,7 @@ pub struct Config {
     pub colors: Colors,
     pub keys: KeyBindings,
     pub active_theme: Option<String>,
+    pub bookmarks: Vec<String>,
 }
 
 /// Resolve the default config directory and file path.
@@ -130,6 +131,7 @@ pub fn built_in_themes() -> Vec<(String, Config)> {
                 },
                 keys: KeyBindings::default(),
                 active_theme: Some("synthwave-84".to_string()),
+                bookmarks: Vec::new(),
             },
         ),
         (
@@ -147,6 +149,7 @@ pub fn built_in_themes() -> Vec<(String, Config)> {
                 },
                 keys: KeyBindings::default(),
                 active_theme: Some("midnight-green".to_string()),
+                bookmarks: Vec::new(),
             },
         ),
         (
@@ -164,6 +167,7 @@ pub fn built_in_themes() -> Vec<(String, Config)> {
                 },
                 keys: KeyBindings::default(),
                 active_theme: Some("amber-crt".to_string()),
+                bookmarks: Vec::new(),
             },
         ),
     ]
@@ -234,6 +238,14 @@ impl Config {
             Some(t) => format!("active_theme = \"{}\"\n", t),
             None => "# active_theme = \"synthwave-84\"\n".to_string(),
         };
+        let bookmarks_toml = if self.bookmarks.is_empty() {
+            "# bookmarks = [\n#     \"/home/user/projects\",\n#     \"/home/user/documents\",\n# ]\n".to_string()
+        } else {
+            let entries: Vec<String> = self.bookmarks.iter()
+                .map(|b| format!("    \"{}\"", b))
+                .collect();
+            format!("bookmarks = [\n{}\n]\n", entries.join(",\n"))
+        };
         format!(
             "# VHS-86 configuration\n\
              # Colors: black, red, green, yellow, blue, magenta, cyan, gray,\n\
@@ -250,6 +262,8 @@ impl Config {
              border = \"{}\"\n\
              status = \"{}\"\n\n\
              # Active theme name. Built-in: synthwave-84, midnight-green, amber-crt\n\
+             {}\n\
+             # Saved directory bookmarks for quick jumping\n\
              {}\n\
              # Optional keybinding overrides.\n\
              # Use a single character or special name: enter, esc, backspace.\n\
@@ -279,6 +293,7 @@ impl Config {
             self.colors.border,
             self.colors.status,
             theme_line,
+            bookmarks_toml,
         )
     }
 }
