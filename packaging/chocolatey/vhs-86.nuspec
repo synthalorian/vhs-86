@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>vhs-86</id>
+    <version>0.9.0</version>
+    <packageSourceUrl>https://github.com/synthalorian/vhs-86</packageSourceUrl>
+    <owners>synthalorian</owners>
+    <title>VHS-86</title>
+    <authors>synthalorian</authors>
+    <projectUrl>https://github.com/synthalorian/vhs-86</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/synthalorian/vhs-86/main/assets/icon.png</iconUrl>
+    <copyright>2025 synthalorian</copyright>
+    <licenseUrl>https://github.com/synthalorian/vhs-86/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/synthalorian/vhs-86</projectSourceUrl>
+    <docsUrl>https://github.com/synthalorian/vhs-86/blob/main/README.md</docsUrl>
+    <bugTrackerUrl>https://github.com/synthalorian/vhs-86/issues</bugTrackerUrl>
+    <tags>terminal file-manager tui synthwave retro vim cli</tags>
+    <summary>A retro terminal file manager with synthwave aesthetics</summary>
+    <description>
+VHS-86 is a terminal-native file manager built in Rust, designed for users who love vim keys, neon colors, and the aesthetic of an 80s CRT monitor. Navigate your filesystem like it's 1986 — but with modern performance.
+
+## Features
+
+- **Vim-style navigation** — h j k l keys to move around
+- **Dual-pane layout** — file list on the left, live preview on the right
+- **Synthwave color scheme** — deep violet blacks, hot magenta, electric cyan, neon green, and gold highlights
+- **File preview** — syntax-highlighted text files, directory contents, archive browsing
+- **Advanced features** — batch operations, permission editor, disk usage analyzer, remote filesystem
+- **Search & integration** — ripgrep-powered content search, shell commands, git status indicators
+- **Plugin system** — WASM-based extensions for custom functionality
+- **Customizable** — themes, keybindings, and configuration via TOML
+
+## Requirements
+
+- Windows 10 or later
+- Windows Terminal or another modern terminal with truecolor support
+
+## Usage
+
+```
+vhs-86 [OPTIONS] [PATH]
+```
+
+Run `vhs-86 --help` for full command-line options.
+    </description>
+    <releaseNotes>https://github.com/synthalorian/vhs-86/blob/main/CHANGELOG.md</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
