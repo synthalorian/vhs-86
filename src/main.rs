@@ -23,10 +23,13 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 use vhs_86::{
     archive::{self, detect_archive, list_tar_entries, list_zip_entries},
     batch::{self, BatchAction, BatchActionType, BatchDialog, BatchSelection},
-    config::Config,
+    config::{Config, CONFIG_VERSION},
+    crash_reporter,
     disk_usage::DiskUsageView,
     git::{GitCache, GitStatus},
     keybindings::Action,
@@ -434,6 +437,14 @@ struct Cli {
     /// Generate man page and exit
     #[arg(long, hide = true)]
     generate_man_page: bool,
+
+    /// Migrate config to the latest format and exit
+    #[arg(long)]
+    migrate_config: bool,
+
+    /// Send feedback message and exit
+    #[arg(long, value_name = "MESSAGE")]
+    feedback: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1167,10 +1178,52 @@ fn truncate(s: &str, max_len: usize) -> String {
 //  MAIN
 // ═══════════════════════════════════════════════════════════════
 fn main() -> io::Result<()> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+
+    crash_reporter::init();
+    info!("VHS-86 v{} starting", env!("CARGO_PKG_VERSION"));
+
     let cli = Cli::parse();
 
     if cli.generate_man_page {
         generate_man_page()?;
+        return Ok(());
+    }
+
+    if cli.migrate_config {
+        let config_path = cli.config.as_ref().map(|p| p.as_path());
+        let (config, migrated) = if let Some(path) = config_path {
+            Config::load_from_and_migrate(path)
+        } else {
+            Config::load_and_migrate()
+        };
+        if migrated {
+            if let Some(path) = config_path {
+                config.save_to(path)?;
+            } else {
+                config.save()?;
+            }
+            println!("Config migrated to version {}", CONFIG_VERSION);
+        } else {
+            println!("Config is already at version {}", CONFIG_VERSION);
+        }
+        return Ok(());
+    }
+
+    if let Some(message) = &cli.feedback {
+        let crash_logs = crash_reporter::read_crash_log();
+        println!("Feedback: {}", message);
+        if let Some(logs) = crash_logs {
+            if !logs.is_empty() {
+                println!("\nRecent crashes:\n{}", logs);
+            }
+        }
+        println!("\nThank you for your feedback!");
         return Ok(());
     }
 
@@ -1232,6 +1285,7 @@ fn main() -> io::Result<()> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
+        error!("Runtime error: {:?}", err);
         eprintln!("Error: {:?}", err);
     }
 
@@ -1240,6 +1294,7 @@ fn main() -> io::Result<()> {
         println!("{}", app.cwd.display());
     }
 
+    info!("VHS-86 shutting down");
     Ok(())
 }
 

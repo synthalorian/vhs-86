@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 use crate::keybindings::Keybindings;
 
+/// Current config format version. Increment when breaking changes are introduced.
+pub const CONFIG_VERSION: u64 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -17,6 +20,9 @@ pub struct Config {
     pub keybindings: Keybindings,
     #[serde(default = "default_plugins")]
     pub plugins: PluginConfig,
+    /// Config format version for migration support.
+    #[serde(default = "default_config_version")]
+    pub config_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +81,10 @@ fn default_plugins() -> PluginConfig {
     }
 }
 
+fn default_config_version() -> u64 {
+    CONFIG_VERSION
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -84,6 +94,7 @@ impl Default for Config {
             shell: default_shell(),
             keybindings: Keybindings::default(),
             plugins: default_plugins(),
+            config_version: CONFIG_VERSION,
         }
     }
 }
@@ -110,6 +121,60 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("~/.config"))
             .join("vhs-86")
             .join("config.toml")
+    }
+
+    /// Save the current config to the default config path.
+    pub fn save(&self) -> std::io::Result<()> {
+        self.save_to(&Self::config_path())
+    }
+
+    /// Save the current config to a specific path.
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, content)
+    }
+
+    /// Migrate an older config to the current version.
+    /// Returns true if migration was performed.
+    pub fn migrate(&mut self) -> bool {
+        if self.config_version >= CONFIG_VERSION {
+            return false;
+        }
+
+        if self.config_version == 0 {
+            if self.theme.is_empty() {
+                self.theme = "synthwave".to_string();
+            }
+            self.config_version = CONFIG_VERSION;
+            return true;
+        }
+
+        self.config_version = CONFIG_VERSION;
+        true
+    }
+
+    /// Load config with automatic migration.
+    pub fn load_and_migrate() -> (Self, bool) {
+        let mut config = Self::load();
+        let migrated = config.migrate();
+        if migrated {
+            let _ = config.save();
+        }
+        (config, migrated)
+    }
+
+    /// Load config from path with automatic migration.
+    pub fn load_from_and_migrate(path: &std::path::Path) -> (Self, bool) {
+        let mut config = Self::load_from(path);
+        let migrated = config.migrate();
+        if migrated {
+            let _ = config.save_to(path);
+        }
+        (config, migrated)
     }
 }
 

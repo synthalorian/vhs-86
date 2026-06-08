@@ -3858,6 +3858,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
  "unicode-width 0.2.0",
  "walkdir",
  "zip",

@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod batch;
 pub mod config;
+pub mod crash_reporter;
 pub mod disk_usage;
 pub mod git;
 pub mod keybindings;
