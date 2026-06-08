@@ -163,3 +163,83 @@ pub fn preview_dir(path: &Path, max_items: usize) -> Vec<String> {
     }
     items
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preview_text_plain() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let file_path = tmpdir.path().join("test.txt");
+        std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+
+        let lines = preview_text_plain(&file_path, 2, 80);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "line1");
+        assert_eq!(lines[1], "line2");
+    }
+
+    #[test]
+    fn test_preview_text_plain_binary() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let file_path = tmpdir.path().join("binary.dat");
+        std::fs::write(&file_path, vec![0u8, 1, 2, 255, 254]).unwrap();
+
+        let lines = preview_text_plain(&file_path, 2, 80);
+        assert_eq!(lines[0], "[binary or unreadable file]");
+    }
+
+    #[test]
+    fn test_preview_text_plain_truncation() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let file_path = tmpdir.path().join("long.txt");
+        std::fs::write(&file_path, "a".repeat(100)).unwrap();
+
+        let lines = preview_text_plain(&file_path, 1, 10);
+        assert_eq!(lines[0].len(), 10);
+        assert!(lines[0].ends_with("..."));
+    }
+
+    #[test]
+    fn test_is_image() {
+        assert!(is_image(Path::new("photo.png")));
+        assert!(is_image(Path::new("photo.jpg")));
+        assert!(is_image(Path::new("photo.jpeg")));
+        assert!(is_image(Path::new("photo.gif")));
+        assert!(is_image(Path::new("photo.bmp")));
+        assert!(is_image(Path::new("photo.webp")));
+        assert!(!is_image(Path::new("file.txt")));
+        assert!(!is_image(Path::new("file.pdf")));
+        assert!(!is_image(Path::new("no_extension")));
+    }
+
+    #[test]
+    fn test_preview_dir() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(tmpdir.path().join("a.txt"), "a").unwrap();
+        std::fs::create_dir(tmpdir.path().join("subdir")).unwrap();
+
+        let items = preview_dir(tmpdir.path(), 10);
+        assert!(!items.is_empty());
+        assert!(items.iter().any(|i| i.contains("a.txt")));
+        assert!(items.iter().any(|i| i.contains("subdir")));
+    }
+
+    #[test]
+    fn test_preview_dir_empty() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let items = preview_dir(tmpdir.path(), 10);
+        assert_eq!(items, vec!["[empty directory]"]);
+    }
+
+    #[test]
+    fn test_preview_dir_max_items() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            std::fs::write(tmpdir.path().join(format!("{}.txt", i)), "x").unwrap();
+        }
+        let items = preview_dir(tmpdir.path(), 3);
+        assert_eq!(items.len(), 3);
+    }
+}

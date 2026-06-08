@@ -187,3 +187,96 @@ impl DiskUsageView {
         self.selected = self.selected.saturating_sub(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_disk_entry_total_size_file() {
+        let entry = DiskEntry {
+            name: "file.txt".to_string(),
+            path: PathBuf::from("/file.txt"),
+            size: 100,
+            children: vec![],
+            is_file: true,
+        };
+        assert_eq!(entry.total_size(), 100);
+    }
+
+    #[test]
+    fn test_disk_entry_total_size_dir() {
+        let child = DiskEntry {
+            name: "child.txt".to_string(),
+            path: PathBuf::from("/dir/child.txt"),
+            size: 50,
+            children: vec![],
+            is_file: true,
+        };
+        let parent = DiskEntry {
+            name: "dir".to_string(),
+            path: PathBuf::from("/dir"),
+            size: 0,
+            children: vec![child],
+            is_file: false,
+        };
+        assert_eq!(parent.total_size(), 50);
+    }
+
+    #[test]
+    fn test_analyze_directory() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(tmpdir.path().join("a.txt"), "aaaa").unwrap();
+        std::fs::write(tmpdir.path().join("b.txt"), "bb").unwrap();
+
+        let sizes = analyze_directory(tmpdir.path());
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.iter().any(|(n, _)| n == "a.txt"));
+        assert!(sizes.iter().any(|(n, _)| n == "b.txt"));
+    }
+
+    #[test]
+    fn test_disk_usage_view_new() {
+        let view = DiskUsageView::new();
+        assert!(!view.visible);
+        assert!(view.path.is_none());
+        assert!(view.entries.is_empty());
+    }
+
+    #[test]
+    fn test_disk_usage_view_open() {
+        let mut view = DiskUsageView::new();
+        let tmpdir = tempfile::tempdir().unwrap();
+        view.open(tmpdir.path());
+        assert!(view.visible);
+        assert_eq!(view.path, Some(tmpdir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_disk_usage_view_move_down() {
+        let mut view = DiskUsageView::new();
+        view.entries = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+        view.move_down();
+        assert_eq!(view.selected, 1);
+        view.move_down();
+        assert_eq!(view.selected, 1);
+    }
+
+    #[test]
+    fn test_disk_usage_view_move_up() {
+        let mut view = DiskUsageView::new();
+        view.entries = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+        view.selected = 1;
+        view.move_up();
+        assert_eq!(view.selected, 0);
+        view.move_up();
+        assert_eq!(view.selected, 0);
+    }
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 8), "hello...");
+    }
+}

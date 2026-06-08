@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::{DirEntry, EntryKind};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArchiveType {
     Zip,
     Tar,
@@ -176,5 +176,110 @@ pub fn archive_type_name(archive_type: &ArchiveType) -> &'static str {
         ArchiveType::Zip => "ZIP",
         ArchiveType::Tar => "TAR",
         ArchiveType::TarGz => "TAR.GZ",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn test_detect_archive_zip() {
+        assert_eq!(
+            detect_archive(Path::new("file.zip")),
+            Some(ArchiveType::Zip)
+        );
+    }
+
+    #[test]
+    fn test_detect_archive_tar() {
+        assert_eq!(
+            detect_archive(Path::new("file.tar")),
+            Some(ArchiveType::Tar)
+        );
+    }
+
+    #[test]
+    fn test_detect_archive_tgz() {
+        assert_eq!(
+            detect_archive(Path::new("file.tgz")),
+            Some(ArchiveType::TarGz)
+        );
+    }
+
+    #[test]
+    fn test_detect_archive_tar_gz() {
+        assert_eq!(
+            detect_archive(Path::new("file.tar.gz")),
+            Some(ArchiveType::TarGz)
+        );
+    }
+
+    #[test]
+    fn test_detect_archive_not_archive() {
+        assert_eq!(detect_archive(Path::new("file.txt")), None);
+        assert_eq!(detect_archive(Path::new("file.pdf")), None);
+    }
+
+    #[test]
+    fn test_archive_type_name() {
+        assert_eq!(archive_type_name(&ArchiveType::Zip), "ZIP");
+        assert_eq!(archive_type_name(&ArchiveType::Tar), "TAR");
+        assert_eq!(archive_type_name(&ArchiveType::TarGz), "TAR.GZ");
+    }
+
+    #[test]
+    fn test_list_zip_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let zip_path = tmpdir.path().join("test.zip");
+
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("hello.txt", options).unwrap();
+        zip.write_all(b"Hello, World!").unwrap();
+        zip.start_file("dir/nested.txt", options).unwrap();
+        zip.write_all(b"Nested content").unwrap();
+        zip.finish().unwrap();
+
+        let entries = list_zip_entries(&zip_path).unwrap();
+        assert!(!entries.is_empty());
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"hello.txt") || names.contains(&"dir"));
+    }
+
+    #[test]
+    fn test_list_tar_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tar_path = tmpdir.path().join("test.tar");
+
+        let file = std::fs::File::create(&tar_path).unwrap();
+        let mut tar = tar::Builder::new(file);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("hello.txt").unwrap();
+        header.set_size(13);
+        header.set_cksum();
+        tar.append(&header, b"Hello, World!".as_slice()).unwrap();
+        tar.finish().unwrap();
+
+        let entries = list_tar_entries(&tar_path, false).unwrap();
+        assert!(!entries.is_empty());
+    }
+
+    #[test]
+    fn test_archive_entries_to_direntries() {
+        let entries = vec![
+            ArchiveEntry {
+                name: "file.txt".to_string(),
+                path: "file.txt".to_string(),
+                kind: EntryKind::File,
+                size: 100,
+                is_dir: false,
+            },
+        ];
+        let dir_entries = archive_entries_to_direntries(Path::new("/archive.zip"), entries);
+        assert_eq!(dir_entries.len(), 1);
+        assert_eq!(dir_entries[0].name, "file.txt");
     }
 }

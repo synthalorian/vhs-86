@@ -132,3 +132,55 @@ impl Default for PluginManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plugin_manager_new() {
+        let pm = PluginManager::new();
+        assert_eq!(pm.count(), 0);
+        assert!(pm.list_plugins().is_empty());
+    }
+
+    #[test]
+    fn test_plugin_manager_default() {
+        let pm: PluginManager = Default::default();
+        assert_eq!(pm.count(), 0);
+    }
+
+    #[test]
+    fn test_plugin_manager_get_nonexistent() {
+        let pm = PluginManager::new();
+        assert!(pm.get_plugin("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_plugin_manager_load_empty_dir() {
+        let mut pm = PluginManager::new();
+        pm.load_plugins();
+        assert_eq!(pm.count(), 0);
+    }
+
+    #[test]
+    fn test_plugin_manager_preview_hook_no_plugins() {
+        let pm = PluginManager::new();
+        let result = pm.preview_hook(Path::new("/tmp/test"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_plugin_manager_on_file_select_no_plugins() {
+        let pm = PluginManager::new();
+        let result = pm.on_file_select(Path::new("/tmp/test"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_plugin_manager_run_no_plugins() {
+        let pm = PluginManager::new();
+        let result = pm.run("test", "func", "input");
+        assert!(result.is_none());
+    }
+}

@@ -7,6 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, Local};
+use clap::{CommandFactory, Parser, crate_authors, crate_description, crate_version};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -22,52 +23,25 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-mod archive;
-mod batch;
-mod config;
-mod disk_usage;
-mod git;
-mod keybindings;
-mod permissions;
-mod plugins;
-mod preview;
-mod remote;
-mod search;
-mod theme;
-
-use archive::{detect_archive, list_tar_entries, list_zip_entries};
-use batch::{BatchAction, BatchActionType, BatchDialog, BatchSelection};
-use config::Config;
-use disk_usage::DiskUsageView;
-use git::{GitCache, GitStatus};
-use keybindings::Action;
-use permissions::ChmodDialog;
-use plugins::PluginManager;
-use remote::{parse_ssh_target, RemoteFs};
-use search::{get_preview_lines, SearchState};
-use theme::Theme;
+use vhs_86::{
+    archive::{self, detect_archive, list_tar_entries, list_zip_entries},
+    batch::{self, BatchAction, BatchActionType, BatchDialog, BatchSelection},
+    config::Config,
+    disk_usage::DiskUsageView,
+    git::{GitCache, GitStatus},
+    keybindings::Action,
+    permissions::{self, ChmodDialog},
+    plugins::PluginManager,
+    preview,
+    remote::{parse_ssh_target, RemoteFs},
+    search::{get_preview_lines, SearchState},
+    theme::Theme,
+    DirEntry, EntryKind, format_size, format_time,
+};
 
 // ═══════════════════════════════════════════════════════════════
 //  APP STATE
 // ═══════════════════════════════════════════════════════════════
-#[derive(Debug, Clone, PartialEq)]
-enum EntryKind {
-    Dir,
-    File,
-    Symlink,
-    Unknown,
-    Archive,
-}
-
-#[derive(Debug, Clone)]
-struct DirEntry {
-    name: String,
-    path: PathBuf,
-    kind: EntryKind,
-    size: u64,
-    modified: Option<DateTime<Local>>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 enum InputMode {
     Normal,
@@ -370,29 +344,96 @@ impl App {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  UTILITIES
+//  CLI ARGUMENTS
 // ═══════════════════════════════════════════════════════════════
-fn format_size(size: u64) -> String {
-    const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
-    if size == 0 {
-        return "-".to_string();
-    }
-    let mut size = size as f64;
-    let mut unit_idx = 0;
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-    if unit_idx == 0 {
-        format!("{} {}", size as u64, UNITS[unit_idx])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit_idx])
-    }
-}
+/// VHS-86 — A retro terminal file manager with synthwave aesthetics
+///
+/// Navigate your filesystem with vim keys, neon colors, and the aesthetic
+/// of an 80s CRT monitor. Browse directories, preview files, search content,
+/// manage permissions, and perform batch operations — all from the terminal.
+///
+/// EXAMPLES:
+///     vhs-86                    # Open in current directory
+///     vhs-86 /path/to/dir       # Open in specific directory
+///     vhs-86 --hidden           # Show hidden files by default
+///     vhs-86 --theme midnight   # Use the midnight color theme
+///     vhs-86 --no-preview       # Disable file preview panel
+///
+/// KEYBINDINGS (Normal Mode):
+///     h / ←         Go to parent directory
+///     j / ↓         Move down
+///     k / ↑         Move up
+///     l / → / Enter Open selected directory or file
+///     g             Jump to top
+///     G             Jump to bottom
+///     ~             Go to home directory
+///     .             Toggle hidden files
+///     0-9           Jump to file by index
+///     Space         Toggle batch selection
+///     /             Open search (ripgrep)
+///     !             Open shell command dialog
+///     c             Open chmod dialog
+///     d             Open disk usage analyzer
+///     r             Open remote SSH connection
+///     D             Delete selected / batch delete
+///     C             Batch copy
+///     M             Batch move
+///     R             Refresh directory listing
+///     q             Quit
+///
+/// SHELL INTEGRATION:
+///     Add this to your shell rc file to cd on quit:
+///
+///     bash/zsh:
+///         vh() { cd "$(vhs-86 "$@" 2>/dev/null)" }
+///
+///     fish:
+///         function vh; cd (vhs-86 $argv 2>/dev/null); end
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "vhs-86",
+    version = crate_version!(),
+    author = crate_authors!(),
+    about = crate_description!(),
+    long_about = None,
+    arg_required_else_help = false,
+)]
+struct Cli {
+    /// Starting directory path (defaults to current directory)
+    #[arg(value_name = "PATH", default_value = ".")]
+    path: PathBuf,
 
-fn format_time(dt: Option<DateTime<Local>>) -> String {
-    dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "-".to_string())
+    /// Show hidden files by default
+    #[arg(short = 'H', long)]
+    hidden: bool,
+
+    /// Use a specific color theme
+    #[arg(short, long, value_name = "THEME")]
+    theme: Option<String>,
+
+    /// Use a custom config file
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Disable file preview panel
+    #[arg(long)]
+    no_preview: bool,
+
+    /// Disable syntax highlighting in previews
+    #[arg(long)]
+    no_highlight: bool,
+
+    /// Print current directory on quit (for shell integration)
+    #[arg(long)]
+    cd_on_quit: bool,
+
+    /// Disable mouse support
+    #[arg(long)]
+    no_mouse: bool,
+
+    /// Generate man page and exit
+    #[arg(long, hide = true)]
+    generate_man_page: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1126,15 +1167,50 @@ fn truncate(s: &str, max_len: usize) -> String {
 //  MAIN
 // ═══════════════════════════════════════════════════════════════
 fn main() -> io::Result<()> {
-    let config = Config::load();
-    let start_dir = env::args().nth(1)
-        .map(PathBuf::from)
-        .or_else(|| env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"));
+    let cli = Cli::parse();
+
+    if cli.generate_man_page {
+        generate_man_page()?;
+        return Ok(());
+    }
+
+    let mut config = if let Some(config_path) = &cli.config {
+        Config::load_from(config_path)
+    } else {
+        Config::load()
+    };
+
+    if cli.hidden {
+        config.show_hidden = true;
+    }
+    if let Some(theme) = &cli.theme {
+        config.theme = theme.clone();
+    }
+    if cli.no_preview {
+        config.preview.syntax_highlight = false;
+        config.preview.image_preview = false;
+    }
+    if cli.no_highlight {
+        config.preview.syntax_highlight = false;
+    }
+    if cli.cd_on_quit {
+        config.shell.cd_on_quit = true;
+    }
+
+    let start_dir = if cli.path.is_absolute() {
+        cli.path.clone()
+    } else {
+        env::current_dir()?.join(&cli.path)
+    };
+    let start_dir = start_dir.canonicalize().unwrap_or(start_dir);
 
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if !cli.no_mouse {
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    } else {
+        execute!(stdout, EnterAlternateScreen)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1144,11 +1220,15 @@ fn main() -> io::Result<()> {
     let res = run_app(&mut terminal, &mut app, tick_rate);
 
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    if !cli.no_mouse {
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+    } else {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    }
     terminal.show_cursor()?;
 
     if let Err(err) = res {
@@ -1160,6 +1240,18 @@ fn main() -> io::Result<()> {
         println!("{}", app.cwd.display());
     }
 
+    Ok(())
+}
+
+fn generate_man_page() -> io::Result<()> {
+    let cmd = Cli::command();
+    let man = clap_mangen::Man::new(cmd);
+    let mut buf = Vec::new();
+    man.render(&mut buf)?;
+    let man_page = String::from_utf8(buf).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("UTF-8 error: {}", e))
+    })?;
+    println!("{}", man_page);
     Ok(())
 }
 

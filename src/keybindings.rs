@@ -100,3 +100,66 @@ impl Keybindings {
 pub fn keycode_to_string(code: &KeyCode) -> String {
     Keybindings::keycode_to_string(code)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keybindings_defaults() {
+        let defaults = Keybindings::defaults();
+        assert_eq!(defaults.get("q"), Some(&Action::Quit));
+        assert_eq!(defaults.get("j"), Some(&Action::MoveDown));
+        assert_eq!(defaults.get("k"), Some(&Action::MoveUp));
+        assert_eq!(defaults.get("h"), Some(&Action::MoveLeft));
+        assert_eq!(defaults.get("l"), Some(&Action::MoveRight));
+        assert_eq!(defaults.get("g"), Some(&Action::GoTop));
+        assert_eq!(defaults.get("G"), Some(&Action::GoBottom));
+        assert_eq!(defaults.get("~"), Some(&Action::GoHome));
+        assert_eq!(defaults.get("."), Some(&Action::ToggleHidden));
+    }
+
+    #[test]
+    fn test_keycode_to_string_char() {
+        assert_eq!(keycode_to_string(&KeyCode::Char('a')), "a");
+        assert_eq!(keycode_to_string(&KeyCode::Char('G')), "G");
+    }
+
+    #[test]
+    fn test_keycode_to_string_special() {
+        assert_eq!(keycode_to_string(&KeyCode::Up), "up");
+        assert_eq!(keycode_to_string(&KeyCode::Down), "down");
+        assert_eq!(keycode_to_string(&KeyCode::Left), "left");
+        assert_eq!(keycode_to_string(&KeyCode::Right), "right");
+        assert_eq!(keycode_to_string(&KeyCode::Enter), "enter");
+        assert_eq!(keycode_to_string(&KeyCode::Esc), "esc");
+        assert_eq!(keycode_to_string(&KeyCode::Backspace), "backspace");
+    }
+
+    #[test]
+    fn test_keybindings_get_action_from_custom() {
+        let mut bindings = Keybindings::default();
+        bindings.bindings.insert("x".to_string(), Action::Quit);
+        assert_eq!(bindings.get_action(&KeyCode::Char('x')), Some(Action::Quit));
+    }
+
+    #[test]
+    fn test_keybindings_get_action_fallback() {
+        let bindings = Keybindings::default();
+        assert_eq!(bindings.get_action(&KeyCode::Char('q')), Some(Action::Quit));
+    }
+
+    #[test]
+    fn test_keybindings_get_action_unknown() {
+        let bindings = Keybindings::default();
+        assert_eq!(bindings.get_action(&KeyCode::Char('z')), None);
+    }
+
+    #[test]
+    fn test_action_serde_roundtrip() {
+        let action = Action::MoveDown;
+        let json = serde_json::to_string(&action).unwrap();
+        let deserialized: Action = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, deserialized);
+    }
+}

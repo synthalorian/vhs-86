@@ -98,3 +98,67 @@ pub fn parse_ssh_target(target: &str) -> Option<(String, String)> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ssh_target_with_user() {
+        let result = parse_ssh_target("alice@example.com");
+        assert!(result.is_some());
+        let (user, host) = result.unwrap();
+        assert_eq!(user, "alice");
+        assert_eq!(host, "example.com");
+    }
+
+    #[test]
+    fn test_parse_ssh_target_without_user() {
+        let result = parse_ssh_target("example.com");
+        if std::env::var("USER").is_ok() {
+            assert!(result.is_some());
+            let (_, host) = result.unwrap();
+            assert_eq!(host, "example.com");
+        } else {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_remote_fs_new() {
+        let fs = RemoteFs::new();
+        assert!(!fs.is_connected());
+        assert!(fs.current_dir().is_none());
+        assert!(fs.connection_string().is_none());
+    }
+
+    #[test]
+    fn test_remote_fs_connect() {
+        let mut fs = RemoteFs::new();
+        assert!(fs.connect("example.com", "alice").is_ok());
+        assert!(fs.is_connected());
+        assert_eq!(fs.connection_string(), Some("alice@example.com".to_string()));
+    }
+
+    #[test]
+    fn test_remote_fs_disconnect() {
+        let mut fs = RemoteFs::new();
+        fs.connect("example.com", "alice").unwrap();
+        fs.disconnect();
+        assert!(!fs.is_connected());
+    }
+
+    #[test]
+    fn test_remote_fs_list_dir_disconnected() {
+        let fs = RemoteFs::new();
+        assert!(fs.list_dir(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn test_remote_fs_list_dir_connected() {
+        let mut fs = RemoteFs::new();
+        fs.connect("example.com", "alice").unwrap();
+        let entries = fs.list_dir(Path::new("/home/alice")).unwrap();
+        assert!(!entries.is_empty());
+    }
+}

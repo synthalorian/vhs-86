@@ -91,8 +91,12 @@ impl Default for Config {
 impl Config {
     pub fn load() -> Self {
         let path = Self::config_path();
+        Self::load_from(&path)
+    }
+
+    pub fn load_from(path: &std::path::Path) -> Self {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(content) = std::fs::read_to_string(path) {
                 if let Ok(config) = toml::from_str::<Config>(&content) {
                     return config;
                 }
@@ -106,5 +110,66 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("~/.config"))
             .join("vhs-86")
             .join("config.toml")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert_eq!(config.theme, "synthwave");
+        assert!(!config.show_hidden);
+        assert!(config.preview.syntax_highlight);
+        assert!(config.preview.image_preview);
+        assert_eq!(config.preview.max_lines, 100);
+        assert!(config.shell.cd_on_quit);
+        assert!(config.plugins.enabled);
+    }
+
+    #[test]
+    fn test_config_load_from_nonexistent() {
+        let path = PathBuf::from("/nonexistent/config.toml");
+        let config = Config::load_from(&path);
+        assert_eq!(config.theme, "synthwave");
+    }
+
+    #[test]
+    fn test_config_load_from_valid() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmpfile,
+            r#"
+theme = "midnight"
+show_hidden = true
+
+[preview]
+syntax_highlight = false
+max_lines = 50
+
+[shell]
+cd_on_quit = false
+"#
+        )
+        .unwrap();
+
+        let config = Config::load_from(tmpfile.path());
+        assert_eq!(config.theme, "midnight");
+        assert!(config.show_hidden);
+        assert!(!config.preview.syntax_highlight);
+        assert_eq!(config.preview.max_lines, 50);
+        assert!(!config.shell.cd_on_quit);
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let deserialized: Config = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(config.theme, deserialized.theme);
+        assert_eq!(config.show_hidden, deserialized.show_hidden);
     }
 }

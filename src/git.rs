@@ -75,3 +75,57 @@ fn map_status(status: git2::Status) -> GitStatus {
         GitStatus::Unchanged
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_cache_new() {
+        let cache = GitCache::new();
+        assert!(!cache.is_repo());
+    }
+
+    #[test]
+    fn test_git_cache_refresh_non_git() {
+        let mut cache = GitCache::new();
+        let tmpdir = tempfile::tempdir().unwrap();
+        cache.refresh(tmpdir.path());
+        assert!(!cache.is_repo());
+    }
+
+    #[test]
+    fn test_git_cache_refresh_git_repo() {
+        let mut cache = GitCache::new();
+        let tmpdir = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmpdir.path()).unwrap();
+        cache.refresh(tmpdir.path());
+        assert!(cache.is_repo());
+    }
+
+    #[test]
+    fn test_git_cache_get_status_no_repo() {
+        let cache = GitCache::new();
+        let tmpdir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            cache.get_status(&tmpdir.path().join("file.txt")),
+            GitStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn test_find_git_root() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let subdir = tmpdir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        git2::Repository::init(tmpdir.path()).unwrap();
+
+        assert_eq!(find_git_root(&subdir), Some(tmpdir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_git_root_none() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        assert_eq!(find_git_root(tmpdir.path()), None);
+    }
+}

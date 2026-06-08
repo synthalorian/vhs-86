@@ -183,3 +183,124 @@ pub fn get_preview_lines(path: &Path, target_line: usize, context_lines: usize) 
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_state_new() {
+        let state = SearchState::new();
+        assert!(!state.visible);
+        assert!(state.query.is_empty());
+        assert!(state.results.is_empty());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_search_state_open() {
+        let mut state = SearchState::new();
+        state.open();
+        assert!(state.visible);
+        assert!(state.query.is_empty());
+    }
+
+    #[test]
+    fn test_search_state_close() {
+        let mut state = SearchState::new();
+        state.open();
+        state.close();
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn test_search_state_push_char() {
+        let mut state = SearchState::new();
+        state.push_char('a');
+        state.push_char('b');
+        assert_eq!(state.query, "ab");
+    }
+
+    #[test]
+    fn test_search_state_pop_char() {
+        let mut state = SearchState::new();
+        state.push_char('a');
+        state.pop_char();
+        assert!(state.query.is_empty());
+        state.pop_char();
+        assert!(state.query.is_empty());
+    }
+
+    #[test]
+    fn test_search_state_move_down() {
+        let mut state = SearchState::new();
+        state.results = vec![
+            SearchResult {
+                file_path: PathBuf::from("a.txt"),
+                line_number: 1,
+                column: 0,
+                matched_text: "a".to_string(),
+                line_text: "aaa".to_string(),
+            },
+            SearchResult {
+                file_path: PathBuf::from("b.txt"),
+                line_number: 2,
+                column: 0,
+                matched_text: "b".to_string(),
+                line_text: "bbb".to_string(),
+            },
+        ];
+        state.move_down(1);
+        assert_eq!(state.selected, 1);
+        state.move_down(1);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn test_search_state_move_up() {
+        let mut state = SearchState::new();
+        state.results = vec![
+            SearchResult {
+                file_path: PathBuf::from("a.txt"),
+                line_number: 1,
+                column: 0,
+                matched_text: "a".to_string(),
+                line_text: "aaa".to_string(),
+            },
+        ];
+        state.selected = 1;
+        state.move_up(1);
+        assert_eq!(state.selected, 0);
+        state.move_up(1);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_search_state_selected_result() {
+        let mut state = SearchState::new();
+        assert!(state.selected_result().is_none());
+
+        let result = SearchResult {
+            file_path: PathBuf::from("a.txt"),
+            line_number: 1,
+            column: 0,
+            matched_text: "a".to_string(),
+            line_text: "aaa".to_string(),
+        };
+        state.results.push(result.clone());
+        assert_eq!(state.selected_result().unwrap().line_text, "aaa");
+    }
+
+    #[test]
+    fn test_get_preview_lines() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let file_path = tmpdir.path().join("test.txt");
+        std::fs::write(&file_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let lines = get_preview_lines(&file_path, 3, 1);
+        assert!(!lines.is_empty());
+        let target = lines.iter().find(|(_, is_target)| *is_target);
+        assert!(target.is_some());
+        assert!(target.unwrap().0.contains("3"));
+    }
+}

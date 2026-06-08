@@ -131,3 +131,109 @@ impl ChmodDialog {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_numeric_mode_valid() {
+        assert_eq!(parse_numeric_mode("755"), Some(0o755));
+        assert_eq!(parse_numeric_mode("644"), Some(0o644));
+        assert_eq!(parse_numeric_mode("777"), Some(0o777));
+        assert_eq!(parse_numeric_mode("000"), Some(0o000));
+    }
+
+    #[test]
+    fn test_parse_numeric_mode_invalid_length() {
+        assert_eq!(parse_numeric_mode("75"), None);
+        assert_eq!(parse_numeric_mode("7555"), None);
+    }
+
+    #[test]
+    fn test_parse_numeric_mode_invalid_chars() {
+        assert_eq!(parse_numeric_mode("78a"), None);
+        assert_eq!(parse_numeric_mode("abc"), None);
+    }
+
+    #[test]
+    fn test_parse_numeric_mode_out_of_range() {
+        assert_eq!(parse_numeric_mode("788"), None);
+    }
+
+    #[test]
+    fn test_mode_to_string() {
+        assert_eq!(mode_to_string(0o755), "rwxr-xr-x");
+        assert_eq!(mode_to_string(0o644), "rw-r--r--");
+        assert_eq!(mode_to_string(0o777), "rwxrwxrwx");
+        assert_eq!(mode_to_string(0o000), "---------");
+    }
+
+    #[test]
+    fn test_string_to_mode_valid() {
+        assert_eq!(string_to_mode("rwxr-xr-x"), Some(0o755));
+        assert_eq!(string_to_mode("rw-r--r--"), Some(0o644));
+    }
+
+    #[test]
+    fn test_string_to_mode_invalid_length() {
+        assert_eq!(string_to_mode("rwxr-xr"), None);
+    }
+
+    #[test]
+    fn test_is_valid_mode_char() {
+        assert!(is_valid_mode_char('0'));
+        assert!(is_valid_mode_char('7'));
+        assert!(!is_valid_mode_char('8'));
+        assert!(!is_valid_mode_char('a'));
+    }
+
+    #[test]
+    fn test_chmod_dialog_new() {
+        let dialog = ChmodDialog::new();
+        assert!(!dialog.visible);
+        assert!(dialog.path.is_none());
+        assert!(dialog.current_mode.is_none());
+    }
+
+    #[test]
+    fn test_chmod_dialog_push_char_valid() {
+        let mut dialog = ChmodDialog::new();
+        dialog.push_char('7');
+        assert_eq!(dialog.input, "7");
+        dialog.push_char('5');
+        assert_eq!(dialog.input, "75");
+        dialog.push_char('5');
+        assert_eq!(dialog.input, "755");
+    }
+
+    #[test]
+    fn test_chmod_dialog_push_char_invalid() {
+        let mut dialog = ChmodDialog::new();
+        dialog.push_char('8');
+        assert_eq!(dialog.input, "");
+    }
+
+    #[test]
+    fn test_chmod_dialog_push_char_max_length() {
+        let mut dialog = ChmodDialog::new();
+        dialog.push_char('7');
+        dialog.push_char('5');
+        dialog.push_char('5');
+        dialog.push_char('5');
+        assert_eq!(dialog.input, "755");
+    }
+
+    #[test]
+    fn test_chmod_dialog_pop_char() {
+        let mut dialog = ChmodDialog::new();
+        dialog.push_char('7');
+        dialog.push_char('5');
+        dialog.pop_char();
+        assert_eq!(dialog.input, "7");
+        dialog.pop_char();
+        assert_eq!(dialog.input, "");
+        dialog.pop_char();
+        assert_eq!(dialog.input, "");
+    }
+}

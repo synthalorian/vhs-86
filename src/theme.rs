@@ -105,3 +105,45 @@ mod color_serde {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_theme_default_is_synthwave() {
+        let theme = Theme::default();
+        assert_eq!(theme.name, "synthwave");
+    }
+
+    #[test]
+    fn test_theme_synthwave() {
+        let theme = Theme::synthwave();
+        assert_eq!(theme.name, "synthwave");
+        assert_eq!(theme.bg, Color::Rgb(10, 2, 26));
+        assert_eq!(theme.magenta, Color::Rgb(255, 0, 255));
+        assert_eq!(theme.cyan, Color::Rgb(0, 255, 255));
+    }
+
+    #[test]
+    fn test_theme_load_known() {
+        let theme = Theme::load("synthwave");
+        assert_eq!(theme.name, "synthwave");
+    }
+
+    #[test]
+    fn test_theme_load_unknown_fallback() {
+        let theme = Theme::load("nonexistent");
+        assert_eq!(theme.name, "synthwave");
+    }
+
+    #[test]
+    fn test_theme_serde_roundtrip() {
+        let theme = Theme::synthwave();
+        let toml_str = toml::to_string(&theme).expect("serialize");
+        let deserialized: Theme = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(theme.name, deserialized.name);
+        assert_eq!(theme.magenta, deserialized.magenta);
+        assert_eq!(theme.cyan, deserialized.cyan);
+    }
+}
