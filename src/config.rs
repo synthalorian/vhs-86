@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::keybindings::Keybindings;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -11,6 +13,10 @@ pub struct Config {
     pub preview: PreviewConfig,
     #[serde(default = "default_shell")]
     pub shell: ShellConfig,
+    #[serde(default)]
+    pub keybindings: Keybindings,
+    #[serde(default = "default_plugins")]
+    pub plugins: PluginConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +33,16 @@ pub struct PreviewConfig {
 pub struct ShellConfig {
     #[serde(default = "default_true")]
     pub cd_on_quit: bool,
+    #[serde(default = "default_shell_command")]
+    pub shell_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_load: bool,
 }
 
 fn default_show_hidden() -> bool { false }
@@ -44,6 +60,18 @@ fn default_preview() -> PreviewConfig {
 fn default_shell() -> ShellConfig {
     ShellConfig {
         cd_on_quit: true,
+        shell_command: default_shell_command(),
+    }
+}
+
+fn default_shell_command() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+fn default_plugins() -> PluginConfig {
+    PluginConfig {
+        enabled: true,
+        auto_load: true,
     }
 }
 
@@ -54,6 +82,8 @@ impl Default for Config {
             show_hidden: false,
             preview: default_preview(),
             shell: default_shell(),
+            keybindings: Keybindings::default(),
+            plugins: default_plugins(),
         }
     }
 }

@@ -27,9 +27,12 @@ mod batch;
 mod config;
 mod disk_usage;
 mod git;
+mod keybindings;
 mod permissions;
+mod plugins;
 mod preview;
 mod remote;
+mod search;
 mod theme;
 
 use archive::{detect_archive, list_tar_entries, list_zip_entries};
@@ -37,8 +40,11 @@ use batch::{BatchAction, BatchActionType, BatchDialog, BatchSelection};
 use config::Config;
 use disk_usage::DiskUsageView;
 use git::{GitCache, GitStatus};
+use keybindings::Action;
 use permissions::ChmodDialog;
+use plugins::PluginManager;
 use remote::{parse_ssh_target, RemoteFs};
+use search::{get_preview_lines, SearchState};
 use theme::Theme;
 
 // ═══════════════════════════════════════════════════════════════
@@ -68,6 +74,8 @@ enum InputMode {
     Chmod,
     Batch,
     RemoteConnect,
+    Search,
+    ShellCommand,
 }
 
 #[derive(Debug, Clone)]
@@ -99,11 +107,19 @@ struct App {
     batch_dialog: BatchDialog,
     input_mode: InputMode,
     input_buffer: String,
+    // v0.6.0 features
+    plugin_manager: PluginManager,
+    search_state: SearchState,
+    shell_output: Option<String>,
 }
 
 impl App {
     fn new(start_dir: PathBuf, config: Config) -> io::Result<Self> {
         let theme = Theme::load(&config.theme);
+        let mut plugin_manager = PluginManager::new();
+        if config.plugins.enabled && config.plugins.auto_load {
+            plugin_manager.load_plugins();
+        }
         let mut app = Self {
             cwd: start_dir.clone(),
             entries: Vec::new(),
@@ -126,6 +142,9 @@ impl App {
             batch_dialog: BatchDialog::new(),
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            plugin_manager,
+            search_state: SearchState::new(),
+            shell_output: None,
         };
         app.refresh()?;
         Ok(app)
@@ -403,6 +422,16 @@ fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    if app.search_state.visible {
+        draw_search(f, app);
+        return;
+    }
+
+    if app.shell_output.is_some() {
+        draw_shell_output(f, app);
+        return;
+    }
+
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -433,6 +462,9 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.batch_selection.active {
         title.push_str(&format!(" [{} selected]", app.batch_selection.count()));
+    }
+    if app.plugin_manager.count() > 0 {
+        title.push_str(&format!(" [+{} plugins]", app.plugin_manager.count()));
     }
 
     let block = Block::default()
@@ -605,6 +637,12 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         ]));
         lines.push(Line::from(""));
 
+        if let Some(plugin_output) = app.plugin_manager.preview_hook(&entry.path) {
+            lines.push(Line::from(Span::styled("Plugin Preview:", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD))));
+            for line in plugin_output.lines().take(max_lines.saturating_sub(lines.len())) {
+                lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(theme.white))));
+            }
+        } else {
         match entry.kind {
             EntryKind::Dir => {
                 lines.push(Line::from(Span::styled("Contents:", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD))));
@@ -663,6 +701,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(Span::styled("[No preview available]", Style::default().fg(theme.gray))));
             }
         }
+        }
         Text::from(lines)
     } else {
         Text::from("[No selection]")
@@ -686,7 +725,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let right = if let Some(ref msg) = app.message {
         format!(" {} ", msg)
     } else {
-        " h/j/k/l or ↑↓  |  Enter=open  |  .=toggle hidden  |  ~=home  |  Space=select  |  q=quit ".to_string()
+        " h/j/k/l  |  Enter=open  |  /=search  |  !=shell  |  .=hidden  |  ~=home  |  Space=select  |  q=quit ".to_string()
     };
 
     let msg_style = if app.message.is_some() {
@@ -822,6 +861,183 @@ fn draw_remote_connect_dialog(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter=connect  Esc=cancel",
+        Style::default().fg(theme.gray),
+    )));
+
+    let para = Paragraph::new(Text::from(lines));
+    f.render_widget(para, inner);
+}
+
+fn draw_search(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = f.area();
+
+    let block = Block::default()
+        .title(Span::styled(" SEARCH ", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD)))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.cyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .split(inner);
+
+    let query_text = format!(">>> {}", app.search_state.query);
+    let query_para = Paragraph::new(query_text)
+        .style(Style::default().fg(theme.yellow).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme.border)),
+        );
+    f.render_widget(query_para, chunks[0]);
+
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+
+    draw_search_results(f, app, h_chunks[0]);
+    draw_search_preview(f, app, h_chunks[1]);
+}
+
+fn draw_search_results(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+
+    let block = Block::default()
+        .title(Span::styled(" Results ", Style::default().fg(theme.magenta).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let visible_rows = inner.height.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+
+    if let Some(ref err) = app.search_state.error {
+        lines.push(Line::from(Span::styled(
+            format!("Error: {}", err),
+            Style::default().fg(theme.red),
+        )));
+    } else if app.search_state.results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Type query and press Enter to search...",
+            Style::default().fg(theme.gray),
+        )));
+    } else {
+        for (idx, result) in app.search_state.results.iter().enumerate() {
+            if idx >= visible_rows {
+                break;
+            }
+            let is_selected = idx == app.search_state.selected;
+            let style = if is_selected {
+                Style::default().bg(theme.highlight).fg(theme.yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.white)
+            };
+
+            let file_name = result.file_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>3}. ", idx + 1), style),
+                Span::styled(format!("{}:{}", file_name, result.line_number), style),
+            ]));
+
+            let match_style = if is_selected {
+                Style::default().bg(theme.highlight).fg(theme.green)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            let trimmed = if result.line_text.len() > 60 {
+                format!("{}...", &result.line_text[..57])
+            } else {
+                result.line_text.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("     {}", trimmed),
+                match_style,
+            )));
+        }
+    }
+
+    let para = Paragraph::new(Text::from(lines));
+    f.render_widget(para, inner);
+}
+
+fn draw_search_preview(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+
+    let block = Block::default()
+        .title(Span::styled(" Preview ", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = Vec::new();
+
+    if let Some(result) = app.search_state.selected_result() {
+        lines.push(Line::from(vec![
+            Span::styled("File: ", Style::default().fg(theme.magenta)),
+            Span::styled(result.file_path.to_string_lossy().to_string(), Style::default().fg(theme.white)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Line: ", Style::default().fg(theme.magenta)),
+            Span::styled(format!("{}:{}", result.line_number, result.column), Style::default().fg(theme.yellow)),
+        ]));
+        lines.push(Line::from(""));
+
+        let preview = get_preview_lines(&result.file_path, result.line_number, 10);
+        for (line_text, is_target) in preview {
+            let style = if is_target {
+                Style::default().bg(theme.highlight).fg(theme.yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.white)
+            };
+            lines.push(Line::from(Span::styled(line_text, style)));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "[No preview available]",
+            Style::default().fg(theme.gray),
+        )));
+    }
+
+    let para = Paragraph::new(Text::from(lines));
+    f.render_widget(para, inner);
+}
+
+fn draw_shell_output(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = f.area();
+
+    let block = Block::default()
+        .title(Span::styled(" SHELL OUTPUT ", Style::default().fg(theme.green).add_modifier(Modifier::BOLD)))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.green));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = Vec::new();
+    if let Some(ref output) = app.shell_output {
+        for line in output.lines().take(inner.height.saturating_sub(2) as usize) {
+            lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(theme.white))));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "[No output]",
+            Style::default().fg(theme.gray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press any key to close",
         Style::default().fg(theme.gray),
     )));
 
@@ -1069,43 +1285,154 @@ fn run_app<B: Backend>(
                         }
                         continue;
                     }
+                    InputMode::Search => {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.input_mode = InputMode::Normal;
+                                app.search_state.close();
+                            }
+                            KeyCode::Enter => {
+                                app.search_state.execute_search(&app.cwd);
+                            }
+                            KeyCode::Backspace => {
+                                app.search_state.pop_char();
+                            }
+                            KeyCode::Down | KeyCode::Up | KeyCode::Right | KeyCode::Left => {
+                                match key.code {
+                                    KeyCode::Down => app.search_state.move_down(1),
+                                    KeyCode::Up => app.search_state.move_up(1),
+                                    KeyCode::Right => {
+                                        if let Some(result) = app.search_state.selected_result() {
+                                            if result.file_path.exists() {
+                                                app.cwd = result.file_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| app.cwd.clone());
+                                                app.selected = 0;
+                                                app.scroll_offset = 0;
+                                                app.search_state.close();
+                                                app.input_mode = InputMode::Normal;
+                                                app.refresh()?;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                match c {
+                                    'j' | 'J' => app.search_state.move_down(1),
+                                    'k' | 'K' => app.search_state.move_up(1),
+                                    'l' | 'L' => {
+                                        if let Some(result) = app.search_state.selected_result() {
+                                            if result.file_path.exists() {
+                                                app.cwd = result.file_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| app.cwd.clone());
+                                                app.selected = 0;
+                                                app.scroll_offset = 0;
+                                                app.search_state.close();
+                                                app.input_mode = InputMode::Normal;
+                                                app.refresh()?;
+                                            }
+                                        }
+                                    }
+                                    _ => app.search_state.push_char(c),
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    InputMode::ShellCommand => {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.input_mode = InputMode::Normal;
+                                app.input_buffer.clear();
+                                app.shell_output = None;
+                            }
+                            KeyCode::Enter => {
+                                let shell = &app.config.shell.shell_command;
+                                let output = std::process::Command::new(shell)
+                                    .arg("-c")
+                                    .arg(&app.input_buffer)
+                                    .current_dir(&app.cwd)
+                                    .output();
+                                match output {
+                                    Ok(out) => {
+                                        let stdout = String::from_utf8_lossy(&out.stdout);
+                                        let stderr = String::from_utf8_lossy(&out.stderr);
+                                        let mut result = String::new();
+                                        if !stdout.is_empty() {
+                                            result.push_str(&stdout);
+                                        }
+                                        if !stderr.is_empty() {
+                                            if !result.is_empty() {
+                                                result.push('\n');
+                                            }
+                                            result.push_str("STDERR:\n");
+                                            result.push_str(&stderr);
+                                        }
+                                        if result.is_empty() {
+                                            result = "[Command completed with no output]".to_string();
+                                        }
+                                        app.shell_output = Some(result);
+                                        app.set_message(format!("Command executed: {}", app.input_buffer));
+                                    }
+                                    Err(e) => {
+                                        app.shell_output = Some(format!("Error: {}", e));
+                                        app.set_message(format!("Command failed: {}", e));
+                                    }
+                                }
+                                app.input_mode = InputMode::Normal;
+                                app.input_buffer.clear();
+                            }
+                            KeyCode::Backspace => {
+                                app.input_buffer.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.input_buffer.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     InputMode::Normal => {}
                 }
 
-                // Normal mode key handling
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                if app.shell_output.is_some() {
+                    app.shell_output = None;
+                    continue;
+                }
+
+                let action = app.config.keybindings.get_action(&key.code);
+                match action {
+                    Some(Action::Quit) => {
                         if app.disk_usage.visible {
                             app.disk_usage.close();
                         } else {
                             app.quit = true;
                         }
                     }
-                    KeyCode::Char('j') | KeyCode::Down => {
+                    Some(Action::MoveDown) => {
                         if app.disk_usage.visible {
                             app.disk_usage.move_down();
                         } else {
                             app.move_down(1);
                         }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
+                    Some(Action::MoveUp) => {
                         if app.disk_usage.visible {
                             app.disk_usage.move_up();
                         } else {
                             app.move_up(1);
                         }
                     }
-                    KeyCode::Char('h') | KeyCode::Left => {
+                    Some(Action::MoveLeft) => {
                         app.go_parent()?;
                     }
-                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
+                    Some(Action::MoveRight) | Some(Action::Enter) => {
                         if app.disk_usage.visible {
-                            // Do nothing in disk usage view
                         } else {
                             app.enter_selected()?;
                         }
                     }
-                    KeyCode::Char('g') => {
+                    Some(Action::GoTop) => {
                         if app.disk_usage.visible {
                             app.disk_usage.selected = 0;
                         } else {
@@ -1113,7 +1440,7 @@ fn run_app<B: Backend>(
                             app.scroll_offset = 0;
                         }
                     }
-                    KeyCode::Char('G') => {
+                    Some(Action::GoBottom) => {
                         if app.disk_usage.visible {
                             if !app.disk_usage.entries.is_empty() {
                                 app.disk_usage.selected = app.disk_usage.entries.len() - 1;
@@ -1122,27 +1449,26 @@ fn run_app<B: Backend>(
                             app.selected = app.entries.len() - 1;
                         }
                     }
-                    KeyCode::Char('~') | KeyCode::Char('`') => {
+                    Some(Action::GoHome) => {
                         app.go_home()?;
                     }
-                    KeyCode::Char('.') => {
+                    Some(Action::ToggleHidden) => {
                         app.toggle_hidden()?;
                         app.set_message(format!("Hidden files: {}", if app.show_hidden { "ON" } else { "OFF" }));
                     }
-                    KeyCode::Char(' ') => {
-                        // Toggle batch selection
+                    Some(Action::ToggleSelect) => {
                         app.batch_selection.toggle(app.selected);
                         let count = app.batch_selection.count();
                         app.set_message(format!("{} items selected", count));
                     }
-                    KeyCode::Char('c') => {
+                    Some(Action::OpenChmod) => {
                         if let Some(entry) = app.entries.get(app.selected) {
                             let path = entry.path.clone();
                             app.input_mode = InputMode::Chmod;
                             app.chmod_dialog.open(&path);
                         }
                     }
-                    KeyCode::Char('d') => {
+                    Some(Action::OpenDiskUsage) => {
                         if app.disk_usage.visible {
                             app.disk_usage.close();
                         } else {
@@ -1150,7 +1476,7 @@ fn run_app<B: Backend>(
                             app.set_message("Disk usage analyzer".to_string());
                         }
                     }
-                    KeyCode::Char('r') => {
+                    Some(Action::OpenRemoteConnect) => {
                         if app.remote_fs.is_connected() {
                             app.remote_fs.disconnect();
                             app.set_message("Disconnected from remote".to_string());
@@ -1160,8 +1486,16 @@ fn run_app<B: Backend>(
                             app.input_buffer.clear();
                         }
                     }
-                    KeyCode::Char('D') => {
-                        // Batch delete
+                    Some(Action::OpenSearch) => {
+                        app.input_mode = InputMode::Search;
+                        app.search_state.open();
+                    }
+                    Some(Action::OpenShell) => {
+                        app.input_mode = InputMode::ShellCommand;
+                        app.input_buffer.clear();
+                        app.shell_output = None;
+                    }
+                    Some(Action::BatchDelete) => {
                         if app.batch_selection.active {
                             app.input_mode = InputMode::Batch;
                             app.batch_dialog.open(BatchActionType::Delete);
@@ -1179,34 +1513,39 @@ fn run_app<B: Backend>(
                             }
                         }
                     }
-                    KeyCode::Char('C') => {
-                        // Batch copy
+                    Some(Action::BatchCopy) => {
                         if app.batch_selection.active {
                             app.input_mode = InputMode::Batch;
                             app.batch_dialog.open(BatchActionType::Copy);
                         }
                     }
-                    KeyCode::Char('M') => {
-                        // Batch move
+                    Some(Action::BatchMove) => {
                         if app.batch_selection.active {
                             app.input_mode = InputMode::Batch;
                             app.batch_dialog.open(BatchActionType::Move);
                         }
                     }
-                    KeyCode::Char(c) if c.is_ascii_digit() => {
-                        let now = Instant::now();
-                        if now.duration_since(app.last_key_time) > Duration::from_millis(800) {
-                            app.key_buffer.clear();
-                        }
-                        app.last_key_time = now;
-                        app.key_buffer.push(c);
-                        if let Ok(n) = app.key_buffer.parse::<usize>() {
-                            if n > 0 && n <= app.entries.len() {
-                                app.selected = n - 1;
+                    Some(Action::Refresh) => {
+                        app.refresh()?;
+                        app.set_message("Refreshed".to_string());
+                    }
+                    None => {
+                        if let KeyCode::Char(c) = key.code {
+                            if c.is_ascii_digit() {
+                                let now = Instant::now();
+                                if now.duration_since(app.last_key_time) > Duration::from_millis(800) {
+                                    app.key_buffer.clear();
+                                }
+                                app.last_key_time = now;
+                                app.key_buffer.push(c);
+                                if let Ok(n) = app.key_buffer.parse::<usize>() {
+                                    if n > 0 && n <= app.entries.len() {
+                                        app.selected = n - 1;
+                                    }
+                                }
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         }
