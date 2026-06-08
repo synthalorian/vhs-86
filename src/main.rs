@@ -1,48 +1,35 @@
 use std::{
     env,
-    fs::{self, Metadata},
+    fs,
     io::{self, stdout},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Local};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    symbols,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
 };
 use unicode_width::UnicodeWidthStr;
-use walkdir::WalkDir;
 
-// ═══════════════════════════════════════════════════════════════
-//  SYNTHWAVE PALETTE
-// ═══════════════════════════════════════════════════════════════
-mod palette {
-    use ratatui::style::Color;
-    pub const BG: Color = Color::Rgb(10, 2, 26);          // deep violet black
-    pub const PANEL_BG: Color = Color::Rgb(18, 4, 42);    // panel background
-    pub const MAGENTA: Color = Color::Rgb(255, 0, 255);   // hot magenta
-    pub const CYAN: Color = Color::Rgb(0, 255, 255);      // electric cyan
-    pub const PINK: Color = Color::Rgb(255, 20, 147);     // deep pink
-    pub const YELLOW: Color = Color::Rgb(255, 215, 0);    // gold
-    pub const ORANGE: Color = Color::Rgb(255, 140, 0);    // dark orange
-    pub const WHITE: Color = Color::Rgb(240, 240, 255);   // soft white
-    pub const GRAY: Color = Color::Rgb(120, 120, 140);    // muted gray
-    pub const GREEN: Color = Color::Rgb(57, 255, 20);     // neon green
-    pub const RED: Color = Color::Rgb(255, 50, 80);       // neon red
-    pub const BORDER: Color = Color::Rgb(180, 0, 180);    // magenta border
-    pub const HIGHLIGHT: Color = Color::Rgb(40, 0, 80);   // selection bg
-}
+mod config;
+mod git;
+mod preview;
+mod theme;
+
+use config::Config;
+use git::{GitCache, GitStatus};
+use theme::Theme;
 
 // ═══════════════════════════════════════════════════════════════
 //  APP STATE
@@ -75,21 +62,28 @@ struct App {
     message: Option<String>,
     message_time: Option<Instant>,
     quit: bool,
+    config: Config,
+    theme: Theme,
+    git_cache: GitCache,
 }
 
 impl App {
-    fn new(start_dir: PathBuf) -> io::Result<Self> {
+    fn new(start_dir: PathBuf, config: Config) -> io::Result<Self> {
+        let theme = Theme::load(&config.theme);
         let mut app = Self {
             cwd: start_dir.clone(),
             entries: Vec::new(),
             selected: 0,
             scroll_offset: 0,
-            show_hidden: false,
+            show_hidden: config.show_hidden,
             last_key_time: Instant::now(),
             key_buffer: String::new(),
             message: None,
             message_time: None,
             quit: false,
+            config,
+            theme,
+            git_cache: GitCache::new(),
         };
         app.refresh()?;
         Ok(app)
@@ -147,6 +141,8 @@ impl App {
 
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
         self.scroll_offset = self.scroll_offset.min(self.selected);
+
+        self.git_cache.refresh(&self.cwd);
         Ok(())
     }
 
@@ -232,46 +228,6 @@ fn format_time(dt: Option<DateTime<Local>>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn preview_text(path: &Path, max_lines: usize, max_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    if let Ok(content) = fs::read_to_string(path) {
-        for line in content.lines().take(max_lines) {
-            let mut l = line.to_string();
-            if l.width() > max_width {
-                l = l.chars().take(max_width.saturating_sub(3)).collect::<String>() + "...";
-            }
-            lines.push(l);
-        }
-    } else {
-        lines.push("[binary or unreadable file]".to_string());
-    }
-    while lines.len() < max_lines {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn preview_dir(path: &Path, max_items: usize) -> Vec<String> {
-    let mut items = Vec::new();
-    if let Ok(rd) = fs::read_dir(path) {
-        for entry in rd.take(max_items) {
-            if let Ok(e) = entry {
-                let name = e.file_name().to_string_lossy().to_string();
-                let icon = if e.metadata().map(|m| m.is_dir()).unwrap_or(false) {
-                    "📁"
-                } else {
-                    "📄"
-                };
-                items.push(format!("{} {}", icon, name));
-            }
-        }
-    }
-    if items.is_empty() {
-        items.push("[empty directory]".to_string());
-    }
-    items
-}
-
 // ═══════════════════════════════════════════════════════════════
 //  UI RENDERING
 // ═══════════════════════════════════════════════════════════════
@@ -285,7 +241,6 @@ fn draw(f: &mut Frame, app: &mut App) {
     let body = main_chunks[0];
     let status_bar = main_chunks[1];
 
-    // Split body into file list (left) and preview (right)
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
@@ -297,13 +252,13 @@ fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
-    use palette::*;
+    let theme = &app.theme;
 
     let block = Block::default()
-        .title(Span::styled(" VHS-86 ", Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" VHS-86 ", Style::default().fg(theme.magenta).add_modifier(Modifier::BOLD)))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER));
+        .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -321,10 +276,24 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let is_selected = idx == app.selected;
         let (icon, color) = match entry.kind {
-            EntryKind::Dir => ("▸", CYAN),
-            EntryKind::File => ("•", WHITE),
-            EntryKind::Symlink => ("~", PINK),
-            EntryKind::Unknown => ("?", GRAY),
+            EntryKind::Dir => ("▸", theme.cyan),
+            EntryKind::File => ("•", theme.white),
+            EntryKind::Symlink => ("~", theme.pink),
+            EntryKind::Unknown => ("?", theme.gray),
+        };
+
+        let git_status = app.git_cache.get_status(&entry.path);
+        let git_prefix = match git_status {
+            GitStatus::Added => "+ ",
+            GitStatus::Modified => "M ",
+            GitStatus::Untracked => "? ",
+            GitStatus::Unchanged => "  ",
+        };
+        let git_color = match git_status {
+            GitStatus::Added => theme.git_added,
+            GitStatus::Modified => theme.git_modified,
+            GitStatus::Untracked => theme.git_untracked,
+            GitStatus::Unchanged => theme.gray,
         };
 
         let name = if entry.name.len() > 24 {
@@ -337,16 +306,25 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
         let time = format_time(entry.modified);
 
         let style = if is_selected {
-            Style::default().bg(HIGHLIGHT).fg(YELLOW).add_modifier(Modifier::BOLD)
+            Style::default().bg(theme.highlight).fg(theme.yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(color)
         };
 
+        let git_style = if is_selected {
+            Style::default().bg(theme.highlight).fg(git_color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(git_color)
+        };
+
         rows.push(Row::new(vec![
-            format!("{} {}", icon, name),
-            size,
-            time,
-        ]).style(style));
+            Line::from(vec![
+                Span::styled(git_prefix, git_style),
+                Span::styled(format!("{} {}", icon, name), style),
+            ]),
+            Line::from(Span::styled(size, style)),
+            Line::from(Span::styled(time, style)),
+        ]));
     }
 
     let table = Table::new(
@@ -358,8 +336,14 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["Name", "Size", "Modified"])
-            .style(Style::default().fg(MAGENTA).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Row::new(vec![
+            Line::from(vec![
+                Span::styled("  ", Style::default().fg(theme.gray)),
+                Span::styled("Name", Style::default().fg(theme.magenta).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            ]),
+            Line::from(Span::styled("Size", Style::default().fg(theme.magenta).add_modifier(Modifier::BOLD | Modifier::UNDERLINED))),
+            Line::from(Span::styled("Modified", Style::default().fg(theme.magenta).add_modifier(Modifier::BOLD | Modifier::UNDERLINED))),
+        ]),
     )
     .column_spacing(1);
 
@@ -367,13 +351,13 @@ fn draw_file_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
-    use palette::*;
+    let theme = &app.theme;
 
     let block = Block::default()
-        .title(Span::styled(" PREVIEW ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" PREVIEW ", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD)))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER));
+        .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -383,42 +367,75 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     let text = if let Some(entry) = app.selected_entry() {
         let mut lines = Vec::new();
         lines.push(Line::from(vec![
-            Span::styled("Name: ", Style::default().fg(MAGENTA)),
-            Span::styled(&entry.name, Style::default().fg(WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("Name: ", Style::default().fg(theme.magenta)),
+            Span::styled(&entry.name, Style::default().fg(theme.white).add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Path: ", Style::default().fg(MAGENTA)),
-            Span::styled(entry.path.to_string_lossy().to_string(), Style::default().fg(GRAY)),
+            Span::styled("Path: ", Style::default().fg(theme.magenta)),
+            Span::styled(entry.path.to_string_lossy().to_string(), Style::default().fg(theme.gray)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Type: ", Style::default().fg(MAGENTA)),
-            Span::styled(format!("{:?}", entry.kind), Style::default().fg(YELLOW)),
+            Span::styled("Type: ", Style::default().fg(theme.magenta)),
+            Span::styled(format!("{:?}", entry.kind), Style::default().fg(theme.yellow)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Size: ", Style::default().fg(MAGENTA)),
-            Span::styled(format_size(entry.size), Style::default().fg(GREEN)),
+            Span::styled("Size: ", Style::default().fg(theme.magenta)),
+            Span::styled(format_size(entry.size), Style::default().fg(theme.green)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("Modified: ", Style::default().fg(MAGENTA)),
-            Span::styled(format_time(entry.modified), Style::default().fg(WHITE)),
+            Span::styled("Modified: ", Style::default().fg(theme.magenta)),
+            Span::styled(format_time(entry.modified), Style::default().fg(theme.white)),
+        ]));
+
+        let git_status = app.git_cache.get_status(&entry.path);
+        let git_str = match git_status {
+            GitStatus::Added => "added",
+            GitStatus::Modified => "modified",
+            GitStatus::Untracked => "untracked",
+            GitStatus::Unchanged => "unchanged",
+        };
+        let git_color = match git_status {
+            GitStatus::Added => theme.git_added,
+            GitStatus::Modified => theme.git_modified,
+            GitStatus::Untracked => theme.git_untracked,
+            GitStatus::Unchanged => theme.gray,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Git: ", Style::default().fg(theme.magenta)),
+            Span::styled(git_str, Style::default().fg(git_color)),
         ]));
         lines.push(Line::from(""));
 
         match entry.kind {
             EntryKind::Dir => {
-                lines.push(Line::from(Span::styled("Contents:", Style::default().fg(CYAN).add_modifier(Modifier::BOLD))));
-                for item in preview_dir(&entry.path, max_lines.saturating_sub(lines.len())) {
-                    lines.push(Line::from(Span::styled(item, Style::default().fg(WHITE))));
+                lines.push(Line::from(Span::styled("Contents:", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD))));
+                for item in preview::preview_dir(&entry.path, max_lines.saturating_sub(lines.len())) {
+                    lines.push(Line::from(Span::styled(item, Style::default().fg(theme.white))));
                 }
             }
             EntryKind::File => {
-                lines.push(Line::from(Span::styled("Preview:", Style::default().fg(CYAN).add_modifier(Modifier::BOLD))));
-                for pline in preview_text(&entry.path, max_lines.saturating_sub(lines.len()), max_width) {
-                    lines.push(Line::from(Span::styled(pline, Style::default().fg(WHITE))));
+                if app.config.preview.image_preview && preview::is_image(&entry.path) {
+                    lines.push(Line::from(Span::styled("[Image preview - Kitty graphics protocol]", Style::default().fg(theme.cyan))));
+                    // Kitty image is drawn separately outside ratatui
+                } else if app.config.preview.syntax_highlight {
+                    lines.push(Line::from(Span::styled("Preview:", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD))));
+                    for (pline, color) in preview::preview_text_highlighted(&entry.path, max_lines.saturating_sub(lines.len()), max_width) {
+                        let style = if let Some((r, g, b)) = color {
+                            Style::default().fg(Color::Rgb(r, g, b))
+                        } else {
+                            Style::default().fg(theme.white)
+                        };
+                        lines.push(Line::from(Span::styled(pline, style)));
+                    }
+                } else {
+                    lines.push(Line::from(Span::styled("Preview:", Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD))));
+                    for pline in preview::preview_text_plain(&entry.path, max_lines.saturating_sub(lines.len()), max_width) {
+                        lines.push(Line::from(Span::styled(pline, Style::default().fg(theme.white))));
+                    }
                 }
             }
             _ => {
-                lines.push(Line::from(Span::styled("[No preview available]", Style::default().fg(GRAY))));
+                lines.push(Line::from(Span::styled("[No preview available]", Style::default().fg(theme.gray))));
             }
         }
         Text::from(lines)
@@ -431,10 +448,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    use palette::*;
+    let theme = &app.theme;
 
     let cwd = app.cwd.to_string_lossy().to_string();
-    let left = format!(" {}  |  {} items  |  hidden: {}", cwd, app.entries.len(), app.show_hidden);
+    let git_indicator = if app.git_cache.is_repo() { " [git]" } else { "" };
+    let left = format!(" {}  |  {} items  |  hidden: {}{}", cwd, app.entries.len(), app.show_hidden, git_indicator);
     let right = if let Some(ref msg) = app.message {
         format!(" {} ", msg)
     } else {
@@ -442,21 +460,21 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let msg_style = if app.message.is_some() {
-        Style::default().bg(RED).fg(WHITE).add_modifier(Modifier::BOLD)
+        Style::default().bg(theme.red).fg(theme.white).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().bg(PANEL_BG).fg(GRAY)
+        Style::default().bg(theme.panel_bg).fg(theme.gray)
     };
 
     let left_width = left.width() as u16;
     let right_width = right.width() as u16;
 
-    let left_span = Span::styled(left, Style::default().bg(PANEL_BG).fg(CYAN));
+    let left_span = Span::styled(left, Style::default().bg(theme.panel_bg).fg(theme.cyan));
     let right_span = Span::styled(right, msg_style);
     let mid = area.width.saturating_sub(left_width + right_width);
 
     let line = Line::from(vec![
         left_span,
-        Span::styled(" ".repeat(mid as usize), Style::default().bg(PANEL_BG)),
+        Span::styled(" ".repeat(mid as usize), Style::default().bg(theme.panel_bg)),
         right_span,
     ]);
 
@@ -464,76 +482,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  EVENT HANDLING
-// ═══════════════════════════════════════════════════════════════
-fn handle_events(app: &mut App) -> io::Result<bool> {
-    if event::poll(Duration::from_millis(100))? {
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                return Ok(false);
-            }
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Char('Q') => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        app.quit = true;
-                    } else {
-                        app.quit = true;
-                    }
-                }
-                KeyCode::Char('j') | KeyCode::Down => app.move_down(1),
-                KeyCode::Char('k') | KeyCode::Up => app.move_up(1),
-                KeyCode::Char('h') | KeyCode::Left => {
-                    let parent = app.cwd.parent().map(|p| p.to_path_buf());
-                    if let Some(p) = parent {
-                        app.cwd = p;
-                        app.selected = 0;
-                        app.scroll_offset = 0;
-                        app.refresh()?;
-                    }
-                }
-                KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
-                    app.enter_selected()?;
-                }
-                KeyCode::Char('g') => {
-                    app.selected = 0;
-                    app.scroll_offset = 0;
-                }
-                KeyCode::Char('G') => {
-                    if !app.entries.is_empty() {
-                        app.selected = app.entries.len() - 1;
-                    }
-                }
-                KeyCode::Char('~') | KeyCode::Char('`') => {
-                    app.go_home()?;
-                }
-                KeyCode::Char('.') => {
-                    app.toggle_hidden()?;
-                    app.set_message(format!("Hidden files: {}", if app.show_hidden { "ON" } else { "OFF" }));
-                }
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    let now = Instant::now();
-                    if now.duration_since(app.last_key_time) > Duration::from_millis(800) {
-                        app.key_buffer.clear();
-                    }
-                    app.last_key_time = now;
-                    app.key_buffer.push(c);
-                    if let Ok(n) = app.key_buffer.parse::<usize>() {
-                        if n > 0 && n <= app.entries.len() {
-                            app.selected = n - 1;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(app.quit)
-}
-
-// ═══════════════════════════════════════════════════════════════
 //  MAIN
 // ═══════════════════════════════════════════════════════════════
 fn main() -> io::Result<()> {
+    let config = Config::load();
     let start_dir = env::args().nth(1)
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
@@ -545,8 +497,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(start_dir)?;
-    let mut last_tick = Instant::now();
+    let mut app = App::new(start_dir, config)?;
     let tick_rate = Duration::from_millis(100);
 
     let res = run_app(&mut terminal, &mut app, tick_rate);
@@ -561,6 +512,11 @@ fn main() -> io::Result<()> {
 
     if let Err(err) = res {
         eprintln!("Error: {:?}", err);
+    }
+
+    // Shell integration: cd on quit
+    if app.config.shell.cd_on_quit {
+        println!("{}", app.cwd.display());
     }
 
     Ok(())

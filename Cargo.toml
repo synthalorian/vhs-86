@@ -1,6 +1,6 @@
 [package]
 name = "vhs-86"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["synthalorian"]
 description = "A retro terminal file manager with synthwave aesthetics"
@@ -15,3 +15,10 @@ ratatui = "0.29"
 walkdir = "2"
 chrono = "0.4"
 unicode-width = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+syntect = "5"
+image = "0.25"
+git2 = "0.20"
+dirs = "6"
+base64 = "0.22"
