@@ -1,0 +1,17 @@
+[package]
+name = "vhs-86"
+version = "0.1.0"
+edition = "2024"
+authors = ["synthalorian"]
+description = "A retro terminal file manager with synthwave aesthetics"
+license = "MIT"
+repository = "https://github.com/synthalorian/vhs-86"
+keywords = ["terminal", "file-manager", "tui", "synthwave", "retro"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
+walkdir = "2"
+chrono = "0.4"
+unicode-width = "0.2"
