@@ -1,0 +1,17 @@
+[
+  {
+    "content": "Fix cargo build errors",
+    "activeForm": "Build and tests pass",
+    "status": "completed"
+  },
+  {
+    "content": "Fix cargo test failures",
+    "activeForm": "Build and tests pass",
+    "status": "completed"
+  },
+  {
+    "content": "Refactor and clean up code",
+    "activeForm": "Check clippy warnings and refactor",
+    "status": "in_progress"
+  }
+]
