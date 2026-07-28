@@ -1,23 +1,25 @@
 mod config;
 mod files;
 
-use config::{parse_color, Config, KeyCodeChar};
+use config::{Config, KeyCodeChar, parse_color};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use notify::{Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use notify::{
+    Config as NotifyConfig, Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
-    Terminal,
 };
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
+use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 use std::collections::HashSet;
 use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
@@ -42,8 +44,8 @@ enum Operation {
 enum Mode {
     Normal,
     Search,
-    Rename(String),      // old name
-    BatchRename,         // batch rename pattern input
+    Rename(String), // old name
+    BatchRename,    // batch rename pattern input
     Confirm(ConfirmAction),
     Command(String),     // command input
     ShellInput(String),  // shell command input
@@ -111,8 +113,7 @@ struct App {
 impl App {
     fn new(initial_dir: PathBuf, config: Config) -> Self {
         let themes = config::load_themes();
-        let picker = Picker::from_query_stdio()
-            .unwrap_or_else(|_| Picker::halfblocks());
+        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         let syntax_set = SyntaxSet::load_defaults_newlines();
         let theme_set = ThemeSet::load_defaults();
         let config_rx = setup_config_watcher();
@@ -173,15 +174,13 @@ impl App {
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
                 // Apply extension filter (only to files, not directories)
-                if !is_dir {
-                    if let Some(ext_filter) = filter_ext {
-                        let file_ext = Path::new(&name)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| e.to_ascii_lowercase());
-                        if file_ext != Some(ext_filter.to_ascii_lowercase()) {
-                            continue;
-                        }
+                if !is_dir && let Some(ext_filter) = filter_ext {
+                    let file_ext = Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase());
+                    if file_ext != Some(ext_filter.to_ascii_lowercase()) {
+                        continue;
                     }
                 }
 
@@ -199,8 +198,12 @@ impl App {
             match sort_by {
                 SortBy::Name => a.0.cmp(&b.0),
                 SortBy::Size => {
-                    let size_a = std::fs::metadata(dir.join(&a.0)).map(|m| m.len()).unwrap_or(0);
-                    let size_b = std::fs::metadata(dir.join(&b.0)).map(|m| m.len()).unwrap_or(0);
+                    let size_a = std::fs::metadata(dir.join(&a.0))
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    let size_b = std::fs::metadata(dir.join(&b.0))
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     size_a.cmp(&size_b)
                 }
                 SortBy::Modified => {
@@ -266,28 +269,36 @@ impl App {
         self.last_image_path = current.clone();
         self.image_state = None;
 
-        if let Some(ref path) = current {
-            if path.is_file() && files::is_image_file(path) {
-                if let Ok(reader) = image::ImageReader::open(path) {
-                    if let Ok(dyn_img) = reader.decode() {
-                        self.image_state = Some(self.picker.new_resize_protocol(dyn_img));
-                    }
-                }
-            }
+        if let Some(ref path) = current
+            && path.is_file()
+            && files::is_image_file(path)
+            && let Ok(reader) = image::ImageReader::open(path)
+            && let Ok(dyn_img) = reader.decode()
+        {
+            self.image_state = Some(self.picker.new_resize_protocol(dyn_img));
         }
     }
 
     fn check_config_reload(&mut self) {
-        if let Some(ref rx) = self.config_rx {
-            if rx.try_recv().is_ok() {
-                std::thread::sleep(Duration::from_millis(100));
-                let new_config = config::load_config();
-                self.config.colors = new_config.colors.clone();
-                self.config.keys = new_config.keys.clone();
-                self.config.active_theme = new_config.active_theme.clone();
-                self.config.bookmarks = new_config.bookmarks.clone();
-                self.set_status("Config reloaded".to_string());
+        if let Some(ref rx) = self.config_rx
+            && rx.try_recv().is_ok()
+        {
+            std::thread::sleep(Duration::from_millis(100));
+            // Debounce duplicate watcher events: only reload when the
+            // config file's mtime actually changed since the last reload.
+            let mtime = config::config_path()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok());
+            if mtime.is_some() && mtime == self.config_last_modified {
+                return;
             }
+            self.config_last_modified = mtime;
+            let new_config = config::load_config();
+            self.config.colors = new_config.colors.clone();
+            self.config.keys = new_config.keys.clone();
+            self.config.active_theme = new_config.active_theme.clone();
+            self.config.bookmarks = new_config.bookmarks.clone();
+            self.set_status("Config reloaded".to_string());
         }
     }
 
@@ -305,13 +316,17 @@ impl App {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        let syntax = self.syntax_set.find_syntax_by_extension(ext)
+                        let syntax = self
+                            .syntax_set
+                            .find_syntax_by_extension(ext)
                             .or_else(|| self.syntax_set.find_syntax_by_first_line(&content))
                             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
                         let theme = &self.theme_set.themes["base16-ocean.dark"];
                         let mut highlighter = HighlightLines::new(syntax, theme);
                         for line in LinesWithEndings::from(&content) {
-                            let highlighted = highlighter.highlight_line(line, &self.syntax_set).unwrap_or_default();
+                            let highlighted = highlighter
+                                .highlight_line(line, &self.syntax_set)
+                                .unwrap_or_default();
                             let mut line_text = String::new();
                             let mut line_style = Style::default();
                             if highlighted.is_empty() {
@@ -319,11 +334,15 @@ impl App {
                             } else {
                                 for (style, text) in highlighted {
                                     line_text.push_str(text);
-                                    line_style = Style::default()
-                                        .fg(Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b));
+                                    line_style = Style::default().fg(Color::Rgb(
+                                        style.foreground.r,
+                                        style.foreground.g,
+                                        style.foreground.b,
+                                    ));
                                 }
                             }
-                            self.file_viewer_content.push((line_text.trim_end_matches('\n').to_string(), line_style));
+                            self.file_viewer_content
+                                .push((line_text.trim_end_matches('\n').to_string(), line_style));
                         }
                         self.mode = Mode::FileViewer;
                     }
@@ -333,7 +352,8 @@ impl App {
                 match files::hex_dump(&path, 2048) {
                     Ok(hex) => {
                         for line in hex.lines() {
-                            self.file_viewer_content.push((line.to_string(), Style::default().fg(Color::Yellow)));
+                            self.file_viewer_content
+                                .push((line.to_string(), Style::default().fg(Color::Yellow)));
                         }
                         self.mode = Mode::FileViewer;
                     }
@@ -363,11 +383,13 @@ impl App {
             Mode::FuzzyFinder(q) => q.to_lowercase(),
             _ => return,
         };
-        self.fuzzy_finder_matches = self.fuzzy_finder_paths
+        self.fuzzy_finder_matches = self
+            .fuzzy_finder_paths
             .iter()
             .enumerate()
             .filter_map(|(i, path)| {
-                let name = path.strip_prefix(&self.current_dir)
+                let name = path
+                    .strip_prefix(&self.current_dir)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
@@ -567,10 +589,8 @@ impl App {
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.shell_scroll += 1;
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if self.shell_scroll > 0 {
-                        self.shell_scroll -= 1;
-                    }
+                KeyCode::Char('k') | KeyCode::Up if self.shell_scroll > 0 => {
+                    self.shell_scroll -= 1;
                 }
                 _ => {}
             },
@@ -590,7 +610,9 @@ impl App {
                     self.file_viewer_scroll += self.list_height as usize;
                 }
                 KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.file_viewer_scroll = self.file_viewer_scroll.saturating_sub(self.list_height as usize);
+                    self.file_viewer_scroll = self
+                        .file_viewer_scroll
+                        .saturating_sub(self.list_height as usize);
                 }
                 KeyCode::Char('g') if modifiers == KeyModifiers::NONE => {
                     self.file_viewer_scroll = 0;
@@ -605,7 +627,9 @@ impl App {
                     self.mode = Mode::Normal;
                 }
                 KeyCode::Enter => {
-                    let selected_path = self.fuzzy_finder_matches.get(self.fuzzy_finder_selected)
+                    let selected_path = self
+                        .fuzzy_finder_matches
+                        .get(self.fuzzy_finder_selected)
                         .and_then(|&idx| self.fuzzy_finder_paths.get(idx))
                         .cloned();
                     if let Some(path) = selected_path {
@@ -614,11 +638,13 @@ impl App {
                             self.refresh();
                             self.selected = 0;
                         } else if let Some(parent) = path.parent() {
-                            let file_name = path.file_name().map(|n| n.to_string_lossy().to_string());
+                            let file_name =
+                                path.file_name().map(|n| n.to_string_lossy().to_string());
                             self.current_dir = parent.to_path_buf();
                             self.refresh();
                             if let Some(name) = file_name {
-                                self.selected = self.files.iter().position(|(n, _)| n == &name).unwrap_or(0);
+                                self.selected =
+                                    self.files.iter().position(|(n, _)| n == &name).unwrap_or(0);
                             }
                         }
                     }
@@ -887,7 +913,10 @@ impl App {
         self.clipboard = items;
         self.selected_indices.clear();
         let count = self.clipboard.len();
-        self.set_status(format!("{} {} item(s) to clipboard. Press 'p' to paste.", op_name, count));
+        self.set_status(format!(
+            "{} {} item(s) to clipboard. Press 'p' to paste.",
+            op_name, count
+        ));
     }
 
     fn perform_paste(&mut self) {
@@ -929,7 +958,9 @@ impl App {
         let paths: Vec<PathBuf> = indices
             .iter()
             .filter_map(|&idx| {
-                self.files.get(idx).map(|(name, _)| self.current_dir.join(name))
+                self.files
+                    .get(idx)
+                    .map(|(name, _)| self.current_dir.join(name))
             })
             .collect();
 
@@ -956,7 +987,7 @@ impl App {
         let new_names = files::generate_sequential_names(pattern, count);
 
         let mut renames = Vec::with_capacity(count);
-        for (idx, new_name) in indices.iter().zip(new_names.into_iter()) {
+        for (idx, new_name) in indices.iter().zip(new_names) {
             if let Some((old_name, _)) = self.files.get(*idx) {
                 if !files::valid_name(&new_name) {
                     self.set_status(format!("Invalid name generated: {}", new_name));
@@ -988,13 +1019,18 @@ impl App {
         } else {
             self.selected_indices.iter().copied().collect()
         };
-        indices.iter()
-            .filter_map(|&idx| self.files.get(idx).map(|(name, _)| self.current_dir.join(name)))
+        indices
+            .iter()
+            .filter_map(|&idx| {
+                self.files
+                    .get(idx)
+                    .map(|(name, _)| self.current_dir.join(name))
+            })
             .collect()
     }
 
     fn execute_command(&mut self, cmd: &str) {
-        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
         if parts.is_empty() {
             return;
         }
@@ -1168,9 +1204,9 @@ impl App {
                         self.set_status("Selected file is not an archive".to_string());
                         return;
                     }
-                    let output_dir = self.current_dir.join(
-                        path.file_stem().unwrap_or(path.as_os_str())
-                    );
+                    let output_dir = self
+                        .current_dir
+                        .join(path.file_stem().unwrap_or(path.as_os_str()));
                     match files::extract_archive(&path, &output_dir) {
                         Ok(()) => {
                             self.set_status(format!("Extracted to: {}", output_dir.display()));
@@ -1210,9 +1246,7 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(i, (name, _))| {
-                matcher
-                    .fuzzy_match(&name.to_lowercase(), &query)
-                    .map(|_| i)
+                matcher.fuzzy_match(&name.to_lowercase(), &query).map(|_| i)
             })
             .collect();
         self.search_selected = 0;
@@ -1249,7 +1283,7 @@ impl App {
                 let mut success = 0;
                 let mut failed = 0;
                 for (i, path) in paths.iter().enumerate() {
-                    if let Err(_) = files::delete_item(path) {
+                    if files::delete_item(path).is_err() {
                         failed += 1;
                     } else {
                         success += 1;
@@ -1331,7 +1365,9 @@ impl App {
                 let style = if i == self.selected || is_match {
                     highlight
                 } else if is_selected {
-                    Style::default().fg(select_color).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(select_color)
+                        .add_modifier(Modifier::BOLD)
                 } else if *is_dir {
                     Style::default().fg(dir_color)
                 } else {
@@ -1357,7 +1393,9 @@ impl App {
             Mode::FuzzyFinder(query) => format!("VHS-86 — find: {}", query),
             _ => {
                 let selected_count = self.selected_indices.len();
-                let filter_info = self.filter_ext.as_ref()
+                let filter_info = self
+                    .filter_ext
+                    .as_ref()
                     .map(|e| format!(" | filter: .{}", e))
                     .unwrap_or_default();
                 if selected_count > 0 {
@@ -1404,15 +1442,18 @@ impl App {
                     match image::image_dimensions(&path) {
                         Ok((w, h)) => Paragraph::new(format!(
                             "🖼️  Image: {}\nDimensions: {}x{} pixels",
-                            name,
-                            w,
-                            h
+                            name, w, h
                         )),
-                        Err(_) => Paragraph::new(format!("🖼️  Image: {} (unable to read dimensions)", name)),
+                        Err(_) => Paragraph::new(format!(
+                            "🖼️  Image: {} (unable to read dimensions)",
+                            name
+                        )),
                     }
                 } else {
                     match std::fs::read_to_string(&path) {
-                        Ok(content) => Paragraph::new(content.chars().take(2000).collect::<String>()),
+                        Ok(content) => {
+                            Paragraph::new(content.chars().take(2000).collect::<String>())
+                        }
                         Err(_) => Paragraph::new("Binary file"),
                     }
                 }
@@ -1446,14 +1487,21 @@ impl App {
             )
         };
         let status_color = parse_color(&self.config.colors.status);
-        let status = Paragraph::new(status_text)
-            .style(Style::default().fg(status_color).add_modifier(Modifier::BOLD));
+        let status = Paragraph::new(status_text).style(
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        );
         f.render_widget(status, status_area);
 
         // Modal overlays
         match &self.mode {
             Mode::Rename(_) => self.draw_input_box(f, "Rename", &self.rename_input),
-            Mode::BatchRename => self.draw_input_box(f, "Batch Rename (pattern: vacation_{:03}.jpg)", &self.batch_rename_input),
+            Mode::BatchRename => self.draw_input_box(
+                f,
+                "Batch Rename (pattern: vacation_{:03}.jpg)",
+                &self.batch_rename_input,
+            ),
             Mode::ShellInput(input) => self.draw_input_box(f, "Shell Command", input),
             Mode::ShellOutput(output) => self.draw_shell_output(f, output),
             Mode::FileViewer => self.draw_file_viewer(f),
@@ -1530,14 +1578,12 @@ impl App {
             cmd
         );
 
-        let command_widget = Paragraph::new(help_text)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Command Palette")
-                    .border_style(Style::default().fg(Color::Cyan)),
-            );
+        let command_widget = Paragraph::new(help_text).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Command Palette")
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
         f.render_widget(command_widget, area);
     }
 
@@ -1546,21 +1592,24 @@ impl App {
         f.render_widget(Clear, area);
 
         let lines: Vec<&str> = output.lines().collect();
-        let visible: Vec<String> = lines.iter()
+        let visible: Vec<String> = lines
+            .iter()
             .skip(self.shell_scroll)
             .take(area.height.saturating_sub(2) as usize)
             .map(|l| l.to_string())
             .collect();
 
         let content = visible.join("\n");
-        let paragraph = Paragraph::new(content)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Shell Output ({} lines, scroll: {})", lines.len(), self.shell_scroll))
-                    .border_style(Style::default().fg(Color::Green)),
-            );
+        let paragraph = Paragraph::new(content).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "Shell Output ({} lines, scroll: {})",
+                    lines.len(),
+                    self.shell_scroll
+                ))
+                .border_style(Style::default().fg(Color::Green)),
+        );
         f.render_widget(paragraph, area);
     }
 
@@ -1568,21 +1617,25 @@ impl App {
         let area = centered_rect(90, 85, f.area());
         f.render_widget(Clear, area);
 
-        let visible: Vec<ratatui::text::Line> = self.file_viewer_content.iter()
+        let visible: Vec<ratatui::text::Line> = self
+            .file_viewer_content
+            .iter()
             .skip(self.file_viewer_scroll)
             .take(area.height.saturating_sub(2) as usize)
-            .map(|(text, style)| {
-                ratatui::text::Line::styled(text.clone(), *style)
-            })
+            .map(|(text, style)| ratatui::text::Line::styled(text.clone(), *style))
             .collect();
 
-        let paragraph = Paragraph::new(ratatui::text::Text::from(visible))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("{} ({} lines, scroll: {})", self.file_viewer_title, self.file_viewer_content.len(), self.file_viewer_scroll))
-                    .border_style(Style::default().fg(Color::Cyan)),
-            );
+        let paragraph = Paragraph::new(ratatui::text::Text::from(visible)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    "{} ({} lines, scroll: {})",
+                    self.file_viewer_title,
+                    self.file_viewer_content.len(),
+                    self.file_viewer_scroll
+                ))
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
         f.render_widget(paragraph, area);
     }
 
@@ -1595,16 +1648,22 @@ impl App {
             _ => String::new(),
         };
 
-        let items: Vec<ListItem> = self.fuzzy_finder_matches.iter()
+        let items: Vec<ListItem> = self
+            .fuzzy_finder_matches
+            .iter()
             .enumerate()
             .map(|(i, &idx)| {
                 let path = &self.fuzzy_finder_paths[idx];
-                let display = path.strip_prefix(&self.current_dir)
+                let display = path
+                    .strip_prefix(&self.current_dir)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
                 let style = if i == self.fuzzy_finder_selected {
-                    Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .bg(Color::Magenta)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -1615,7 +1674,11 @@ impl App {
         let list = List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("Fuzzy Finder: {} ({} matches)", query, self.fuzzy_finder_matches.len()))
+                .title(format!(
+                    "Fuzzy Finder: {} ({} matches)",
+                    query,
+                    self.fuzzy_finder_matches.len()
+                ))
                 .border_style(Style::default().fg(Color::Yellow)),
         );
         f.render_widget(list, area);
@@ -1626,22 +1689,30 @@ impl App {
         f.render_widget(Clear, area);
 
         if self.config.bookmarks.is_empty() {
-            let msg = Paragraph::new("No bookmarks saved.\nPress 'b' in normal mode to bookmark current directory.")
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Bookmarks")
-                        .border_style(Style::default().fg(Color::Cyan)),
-                );
+            let msg = Paragraph::new(
+                "No bookmarks saved.\nPress 'b' in normal mode to bookmark current directory.",
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Bookmarks")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
             f.render_widget(msg, area);
             return;
         }
 
-        let items: Vec<ListItem> = self.config.bookmarks.iter()
+        let items: Vec<ListItem> = self
+            .config
+            .bookmarks
+            .iter()
             .enumerate()
             .map(|(i, path)| {
                 let style = if i == self.bookmark_selected {
-                    Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .bg(Color::Magenta)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -1682,23 +1753,23 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn setup_config_watcher() -> Option<mpsc::Receiver<()>> {
     let (tx, rx) = mpsc::channel();
-    if let Some(path) = config::config_path() {
-        if let Some(parent) = path.parent() {
-            let parent = parent.to_path_buf();
-            let tx = tx.clone();
-            if let Ok(mut watcher) = RecommendedWatcher::new(
-                move |res: Result<NotifyEvent, notify::Error>| {
-                    if let Ok(event) = res {
-                        if event.kind.is_modify() {
-                            let _ = tx.send(());
-                        }
-                    }
-                },
-                NotifyConfig::default(),
-            ) {
-                let _ = watcher.watch(&parent, RecursiveMode::NonRecursive);
-                std::mem::forget(watcher);
-            }
+    if let Some(path) = config::config_path()
+        && let Some(parent) = path.parent()
+    {
+        let parent = parent.to_path_buf();
+        let tx = tx.clone();
+        if let Ok(mut watcher) = RecommendedWatcher::new(
+            move |res: Result<NotifyEvent, notify::Error>| {
+                if let Ok(event) = res
+                    && event.kind.is_modify()
+                {
+                    let _ = tx.send(());
+                }
+            },
+            NotifyConfig::default(),
+        ) {
+            let _ = watcher.watch(&parent, RecursiveMode::NonRecursive);
+            std::mem::forget(watcher);
         }
     }
     Some(rx)
@@ -1744,4 +1815,144 @@ fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn names(listing: &[(String, bool)]) -> Vec<&str> {
+        listing.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn list_files_sorts_by_name() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("charlie.txt"), b"").unwrap();
+        fs::write(tmp.path().join("alpha.txt"), b"").unwrap();
+        fs::write(tmp.path().join("bravo.txt"), b"").unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Name, None);
+        assert_eq!(
+            names(&listing),
+            vec!["alpha.txt", "bravo.txt", "charlie.txt"]
+        );
+    }
+
+    #[test]
+    fn list_files_puts_directories_first() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("aaa_file.txt"), b"").unwrap();
+        fs::create_dir(tmp.path().join("zzz_dir")).unwrap();
+        fs::create_dir(tmp.path().join("mmm_dir")).unwrap();
+        fs::write(tmp.path().join("bbb_file.txt"), b"").unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Name, None);
+        assert_eq!(
+            names(&listing),
+            vec!["mmm_dir", "zzz_dir", "aaa_file.txt", "bbb_file.txt"],
+            "directories must come first, sorted among themselves"
+        );
+        assert!(listing[0].1 && listing[1].1, "first two entries are dirs");
+        assert!(!listing[2].1 && !listing[3].1, "last two entries are files");
+    }
+
+    #[test]
+    fn list_files_directories_first_even_when_sorting_by_size() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("dir")).unwrap();
+        fs::write(tmp.path().join("small.txt"), b"x").unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Size, None);
+        assert_eq!(names(&listing), vec!["dir", "small.txt"]);
+    }
+
+    #[test]
+    fn list_files_sorts_by_size_ascending() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("big.txt"), vec![0u8; 300]).unwrap();
+        fs::write(tmp.path().join("small.txt"), vec![0u8; 10]).unwrap();
+        fs::write(tmp.path().join("mid.txt"), vec![0u8; 100]).unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Size, None);
+        assert_eq!(names(&listing), vec!["small.txt", "mid.txt", "big.txt"]);
+    }
+
+    #[test]
+    fn list_files_sorts_by_modified_ascending() {
+        let tmp = TempDir::new().unwrap();
+        let oldest = tmp.path().join("oldest.txt");
+        let middle = tmp.path().join("middle.txt");
+        let newest = tmp.path().join("newest.txt");
+        fs::write(&oldest, b"").unwrap();
+        fs::write(&middle, b"").unwrap();
+        fs::write(&newest, b"").unwrap();
+        let now = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(&oldest)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(300))
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&middle)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(200))
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&newest)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(100))
+            .unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Modified, None);
+        assert_eq!(
+            names(&listing),
+            vec!["oldest.txt", "middle.txt", "newest.txt"]
+        );
+    }
+
+    #[test]
+    fn list_files_hides_dotfiles_when_show_hidden_off() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("visible.txt"), b"").unwrap();
+        fs::write(tmp.path().join(".hidden"), b"").unwrap();
+        fs::create_dir(tmp.path().join(".hiddendir")).unwrap();
+        let shown = App::list_files(tmp.path(), false, SortBy::Name, None);
+        assert_eq!(names(&shown), vec!["visible.txt"]);
+        let all = App::list_files(tmp.path(), true, SortBy::Name, None);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn list_files_extension_filter_matches_files_only() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("song.rs"), b"").unwrap();
+        fs::write(tmp.path().join("notes.txt"), b"").unwrap();
+        fs::write(tmp.path().join("UPPER.RS"), b"").unwrap();
+        fs::create_dir(tmp.path().join("src")).unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Name, Some("rs"));
+        assert_eq!(
+            names(&listing),
+            vec!["src", "UPPER.RS", "song.rs"],
+            "dirs pass through filter; extension match is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn list_files_empty_directory_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let listing = App::list_files(tmp.path(), true, SortBy::Name, None);
+        assert!(listing.is_empty());
+    }
+
+    #[test]
+    fn list_files_missing_directory_returns_empty() {
+        let listing = App::list_files(
+            Path::new("/definitely/not/a/real/dir"),
+            true,
+            SortBy::Name,
+            None,
+        );
+        assert!(listing.is_empty());
+    }
 }
