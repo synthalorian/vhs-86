@@ -239,7 +239,7 @@ Supported image formats: PNG, JPG, JPEG, GIF, BMP, WebP, TIFF, ICO, AVIF.
 
 ## License
 
-MIT
+Apache-2.0
 
 ---
 
