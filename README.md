@@ -1,3 +1,5 @@
+![vhs-86](.github/preview.png)
+
 # 📼 VHS-86
 
 A retro terminal file manager with synthwave aesthetics. Navigate your filesystem like it's 1986.
