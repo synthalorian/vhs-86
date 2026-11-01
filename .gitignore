@@ -1,3 +1,8 @@
 /target
 
 .sandbox-home/
+
+# Local agent session logs
+.claw/sessions/
+.omo/
+.clawd-todos.json
